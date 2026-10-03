@@ -1,1 +1,31 @@
-# Ansible
+# macOS
+.DS_Store
+
+# Editor
+*.swp
+*~
+
+# Ansible local runtime
+*.retry
+.ansible/
+
+# Collections installed by ansible-galaxy. Commit requirements.yml, not the download.
+ansible/collections/
+
+# Secrets.
+.env
+.env.*
+*.pem
+*.key
+id_rsa
+id_ed25519
+*vault-password*
+*vault_password*
+**/secrets.yml
+**/secrets.yaml
+
+# OpenTofu / Terraform local state, if guest provisioning is added later
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
