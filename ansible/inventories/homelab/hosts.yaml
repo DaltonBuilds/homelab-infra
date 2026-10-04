@@ -1,0 +1,20 @@
+all:
+  children:
+    pve:
+      hosts:
+        pve-01:
+          ansible_host: 192.168.40.50
+        pve-02:
+          ansible_host: 192.168.40.55
+        pve-03:
+          ansible_host: 192.168.40.58
+        pve-04:
+          ansible_host: 192.168.40.59
+        pve-05:
+          ansible_host: 192.168.40.64
+        pve-06:
+          ansible_host: 192.168.40.65
+        pve-07:
+          ansible_host: 192.168.40.66
+      vars:
+        ansible_user: root
