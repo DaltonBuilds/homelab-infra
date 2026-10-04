@@ -19,7 +19,7 @@
       changed_when: false
 
     - name: Register cluster status
-      ansible.builtin.command: /usr/sbin/pvecm status
+      ansible.builtin.command: /usr/bin/pvecm status
       register: pve_cluster_status
       changed_when: false
 
