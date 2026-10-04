@@ -8,7 +8,9 @@ Current scope is the Proxmox host baseline ([ADR-013](https://github.com/DaltonB
 
 ```text
 homelab-infra/
-├── mise.toml                        # pinned ansible-core
+├── mise.toml                        # pinned ansible-core, yamllint, pre-commit
+├── .yamllint.yaml                   # YAML document-start rule
+├── .pre-commit-config.yaml
 ├── ansible/
 │   ├── ansible.cfg
 │   ├── requirements.yml             # pinned collections, when added
@@ -17,6 +19,8 @@ homelab-infra/
 ```
 
 From the repo root, `mise install` installs the pinned Ansible CLI. `mise.toml` points `ANSIBLE_CONFIG` at `ansible/ansible.cfg`. Galaxy collections install under `ansible/collections/`, which Git ignores. Shared roles get added when a task is used by more than one play.
+
+`mise run lint` checks that every YAML file starts with `---`. Install the same check as a Git hook with `mise exec -- pre-commit install`.
 
 ## Docs
 

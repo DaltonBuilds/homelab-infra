@@ -1,0 +1,28 @@
+---
+# House style only: every YAML file must open with a document start marker.
+# yamllint still reports syntax errors. Other style rules stay off.
+
+extends: default
+
+ignore: |
+  ansible/collections/
+
+rules:
+  document-start:
+    level: error
+    present: true
+  braces: disable
+  brackets: disable
+  colons: disable
+  commas: disable
+  comments: disable
+  comments-indentation: disable
+  empty-lines: disable
+  empty-values: disable
+  hyphens: disable
+  indentation: enable
+  line-length: disable
+  new-line-at-end-of-file: enable
+  new-lines: disable
+  trailing-spaces: enable
+  truthy: disable

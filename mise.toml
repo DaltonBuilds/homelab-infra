@@ -1,5 +1,12 @@
 [tools]
 ansible-core = "2.21.4"
+# Keep yamllint on the same release as .pre-commit-config.yaml.
+pre-commit = "4.6.2"
+yamllint = "1.38.0"
 
 [env]
 ANSIBLE_CONFIG = "{{config_root}}/ansible/ansible.cfg"
+
+[tasks.lint]
+description = "Require a YAML document start marker"
+run = "yamllint ."

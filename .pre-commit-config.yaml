@@ -1,0 +1,7 @@
+---
+# Keep this rev on the same yamllint release as mise.toml.
+repos:
+  - repo: https://github.com/adrienverge/yamllint
+    rev: v1.38.0
+    hooks:
+      - id: yamllint

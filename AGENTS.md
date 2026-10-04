@@ -13,6 +13,8 @@ Current work is the Phase 0.1 Proxmox post-install baseline for the seven `homel
 
 `ansible-core` 2.21.4 is pinned in `mise.toml`. Install it with `mise install` from the repo root. That config sets `ANSIBLE_CONFIG` to `ansible/ansible.cfg`.
 
+YAML files in this repo start with `---`. `mise run lint` checks that, and the same yamllint rule runs from the pre-commit hook.
+
 Inspect a host before adopting it. Do not reinstall a working host to bring it under Ansible.
 
 A normal baseline run must not:
