@@ -8,6 +8,7 @@ Current scope is the Proxmox host baseline ([ADR-013](https://github.com/DaltonB
 
 ```text
 homelab-infra/
+├── mise.toml                        # pinned ansible-core
 ├── ansible/
 │   ├── ansible.cfg
 │   ├── requirements.yml             # pinned collections, when added
@@ -15,7 +16,7 @@ homelab-infra/
 │   └── playbooks/                   # pve-inspect, pve-baseline, pve-verify
 ```
 
-Playbooks run from `ansible/`. Shared roles get added when a task is used by more than one play. OpenTofu is intentionally absent until a guest needs to be created by it.
+From the repo root, `mise install` installs the pinned Ansible CLI. `mise.toml` points `ANSIBLE_CONFIG` at `ansible/ansible.cfg`. Galaxy collections install under `ansible/collections/`, which Git ignores. Shared roles get added when a task is used by more than one play.
 
 ## Docs
 

@@ -1,0 +1,5 @@
+[tools]
+ansible-core = "2.21.4"
+
+[env]
+ANSIBLE_CONFIG = "{{config_root}}/ansible/ansible.cfg"
