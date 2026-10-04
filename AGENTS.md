@@ -11,7 +11,7 @@ Current work is the Phase 0.1 Proxmox post-install baseline for the seven `homel
 
 ## Ansible
 
-Run playbooks from `ansible/`.
+`ansible-core` 2.21.4 is pinned in `mise.toml`. Install it with `mise install` from the repo root. That config sets `ANSIBLE_CONFIG` to `ansible/ansible.cfg`.
 
 Inspect a host before adopting it. Do not reinstall a working host to bring it under Ansible.
 
