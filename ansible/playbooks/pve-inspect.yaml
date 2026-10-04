@@ -1,0 +1,119 @@
+---
+- name: Inspect Proxmox hosts
+  hosts: pve
+  gather_facts: true
+  tasks:
+    - name: Register Proxmox version
+      ansible.builtin.command: /usr/bin/pveversion --verbose
+      register: pve_version
+      changed_when: false
+
+    - name: Register clock and time synchronization
+      ansible.builtin.command: /usr/bin/timedatectl show
+      register: pve_datetime
+      changed_when: false
+
+    - name: Register storage
+      ansible.builtin.command: /usr/sbin/pvesm status
+      register: pve_storage
+      changed_when: false
+
+    - name: Register cluster status
+      ansible.builtin.command: /usr/sbin/pvecm status
+      register: pve_cluster_status
+      changed_when: false
+
+    - name: Register HA guests status
+      ansible.builtin.command: /usr/sbin/ha-manager status
+      register: pve_ha_status
+      changed_when: false
+
+    - name: Find APT source files
+      ansible.builtin.find:
+        paths:
+          - /etc/apt
+          - /etc/apt/sources.list.d
+        patterns:
+          - sources.list
+          - "*.list"
+          - "*.sources"
+        recurse: false
+        file_type: file
+      register: apt_source_files
+
+    - name: Read APT source files
+      ansible.builtin.slurp:
+        src: "{{ item.path }}"
+      loop: "{{ apt_source_files.files }}"
+      loop_control:
+        label: "{{ item.path }}"
+      register: apt_sources
+
+    - name: Record APT source contents
+      ansible.builtin.set_fact:
+        pve_apt_sources: "{{ pve_apt_sources | default({}) | combine({item.item.path: item.content | b64decode}) }}"
+      loop: "{{ apt_sources.results }}"
+      loop_control:
+        label: "{{ item.item.path }}"
+      changed_when: false
+
+    # Facts already describe live NICs and bridges. This file is where VLAN-aware settings live.
+    - name: Read network interface configuration
+      ansible.builtin.slurp:
+        src: /etc/network/interfaces
+      register: network_interfaces
+
+    - name: Select physical NICs and bridges
+      ansible.builtin.set_fact:
+        pve_interfaces: >-
+          {{
+            pve_interfaces | default({}) | combine({
+              item: {
+                'type': ansible_facts[item].type,
+                'macaddress': ansible_facts[item].macaddress | default(''),
+                'mtu': ansible_facts[item].mtu | default(0),
+                'active': ansible_facts[item].active | default(false),
+                'ipv4': ansible_facts[item].ipv4.address | default(''),
+                'members': ansible_facts[item].interfaces | default([]),
+                'stp': ansible_facts[item].stp | default(false),
+              }
+            })
+          }}
+      loop: "{{ ansible_facts.interfaces }}"
+      when: ansible_facts[item].type | default('') in ['ether', 'bridge']
+      loop_control:
+        label: "{{ item }}"
+      changed_when: false
+
+    - name: Read the ZFS ARC cap
+      ansible.builtin.slurp:
+        src: /sys/module/zfs/parameters/zfs_arc_max
+      register: zfs_arc_max
+      when: inventory_hostname == 'pve-07'
+
+    - name: List NVIDIA devices
+      ansible.builtin.command: "/usr/bin/lspci -nn -d 10de:"
+      register: nvidia_devices
+      changed_when: false
+      when: inventory_hostname == 'pve-07'
+
+    - name: Report what this host is
+      ansible.builtin.debug:
+        var: inspection
+      vars:
+        inspection:
+          hostname: "{{ ansible_hostname }}"
+          address: "{{ ansible_host }}"
+          os: "{{ ansible_distribution }} {{ ansible_distribution_version }}"
+          gateway: "{{ ansible_default_ipv4.gateway | default('') }}"
+          dns_servers: "{{ ansible_dns.nameservers | default([]) }}"
+          pveversion: "{{ pve_version.stdout_lines }}"
+          datetime: "{{ pve_datetime.stdout_lines }}"
+          storage: "{{ pve_storage.stdout_lines }}"
+          cluster: "{{ pve_cluster_status.stdout_lines }}"
+          ha: "{{ pve_ha_status.stdout_lines }}"
+          interfaces: "{{ pve_interfaces | default({}) }}"
+          network_interfaces: "{{ (network_interfaces.content | b64decode).splitlines() }}"
+          apt_sources: "{{ pve_apt_sources | default({}) }}"
+          zfs_arc_max: "{{ (zfs_arc_max.content | b64decode).strip() if inventory_hostname == 'pve-07' else 'n/a' }}"
+          nvidia_devices: "{{ nvidia_devices.stdout_lines if inventory_hostname == 'pve-07' else [] }}"
