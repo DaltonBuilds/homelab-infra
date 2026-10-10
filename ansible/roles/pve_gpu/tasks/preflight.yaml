@@ -1,0 +1,39 @@
+---
+- name: Require explicit pve-07 GPU inventory
+  ansible.builtin.assert:
+    that:
+      - inventory_hostname == 'pve-07'
+      - ansible_facts.hostname == 'pve-07'
+      - pve_gpu_passthrough_enabled | default(false) | bool
+      - pve_gpu_devices | length == 2
+    fail_msg: GPU configuration is restricted to the verified pve-07 inventory.
+
+- name: Require the exact expected NVIDIA functions
+  ansible.builtin.assert:
+    that:
+      - pve_gpu_inspection.devices | map(attribute='address') | sort == pve_gpu_devices | map(attribute='address') | sort
+      - observed | length == 1
+      - observed[0].id == item.id
+      - observed[0].iommu_group is not none
+    fail_msg: Hardware differs from inventory; inspect IDs, slots and IOMMU support before proceeding.
+  vars:
+    observed: "{{ pve_gpu_inspection.devices | selectattr('address', 'equalto', item.address) | list }}"
+  loop: "{{ pve_gpu_devices }}"
+  loop_control:
+    label: "{{ item.address }}"
+
+- name: Require isolated GPU groups with only expected functions or PCI bridges
+  ansible.builtin.assert:
+    that:
+      - item.address in (pve_gpu_devices | map(attribute='address') | list) or item['class'].startswith('0x0604')
+    fail_msg: Unrelated endpoint shares a GPU IOMMU group; stop and investigate. No ACS override is applied.
+  loop: "{{ pve_gpu_inspection.iommu_groups.values() | flatten }}"
+  loop_control:
+    label: "{{ item.address }}"
+
+- name: Require an independent host framebuffer and preserve the verified ARC cap
+  ansible.builtin.assert:
+    that:
+      - "'astdrmfb' in pve_gpu_inspection.framebuffers.values()"
+      - pve_gpu_inspection.zfs_arc_max | int == pve_zfs_arc_max_expected | int
+    fail_msg: Host console or ARC cap differs from verified setup; reconcile before GPU changes.

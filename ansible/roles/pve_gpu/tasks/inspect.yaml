@@ -1,0 +1,31 @@
+---
+- name: Inspect GPU hardware and boot configuration
+  ansible.builtin.command:
+    argv: [/usr/bin/python3, '-']
+    stdin: "{{ lookup('ansible.builtin.file', role_path ~ '/files/inspect.py') }}"
+  register: pve_gpu_inspection_command
+  changed_when: false
+  check_mode: false
+
+- name: Decode GPU inspection
+  ansible.builtin.set_fact:
+    pve_gpu_inspection: "{{ pve_gpu_inspection_command.stdout | from_json }}"
+
+- name: List NVIDIA device drivers
+  ansible.builtin.command: '/usr/bin/lspci -nnk -d 10de:'
+  register: pve_gpu_lspci
+  changed_when: false
+  check_mode: false
+
+- name: Inspect Proxmox bootloader management
+  ansible.builtin.command: /usr/sbin/proxmox-boot-tool status
+  register: pve_gpu_boot_tool
+  changed_when: false
+  check_mode: false
+
+- name: Report GPU inspection
+  ansible.builtin.debug:
+    msg:
+      hardware_and_configuration: "{{ pve_gpu_inspection }}"
+      nvidia_drivers: "{{ pve_gpu_lspci.stdout_lines }}"
+      boot_tool: "{{ pve_gpu_boot_tool.stdout_lines }}"

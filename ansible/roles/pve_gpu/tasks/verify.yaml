@@ -1,0 +1,58 @@
+---
+- name: Inspect current GPU state
+  ansible.builtin.import_tasks: inspect.yaml
+
+- name: Validate hardware prerequisites
+  ansible.builtin.import_tasks: preflight.yaml
+
+- name: Check for an unfinished GPU initramfs rebuild
+  ansible.builtin.stat:
+    path: /etc/initramfs-tools/.homelab-gpu-rebuild-pending
+  register: pve_gpu_unfinished_rebuild
+
+- name: Require completed initramfs regeneration
+  ansible.builtin.assert:
+    that:
+      - not pve_gpu_unfinished_rebuild.stat.exists
+    fail_msg: Finish the pending initramfs rebuild before treating GPU configuration as verified.
+
+- name: Verify both functions are bound to VFIO
+  ansible.builtin.assert:
+    that:
+      - item.driver == 'vfio-pci'
+    fail_msg: GPU binding is not active; review configuration and complete explicit reboot maintenance.
+  loop: "{{ pve_gpu_inspection.devices }}"
+  loop_control:
+    label: "{{ item.address }}"
+
+- name: Verify VFIO modules and absence of host NVIDIA drivers
+  ansible.builtin.assert:
+    that:
+      - pve_gpu_modules | difference(pve_gpu_inspection.loaded_modules) | length == 0
+      - pve_gpu_blacklist | intersect(pve_gpu_inspection.loaded_modules) | length == 0
+
+- name: Verify persistent VFIO configuration exists
+  ansible.builtin.assert:
+    that:
+      - pve_gpu_inspection.files['/etc/modprobe.d/homelab-gpu-vfio.conf'] is not none
+      - pve_gpu_inspection.files['/etc/modules-load.d/homelab-gpu-vfio.conf'] is not none
+      - pve_gpu_inspection.files['/etc/initramfs-tools/modules'] is not none
+
+- name: Verify persistent binding and soft dependency
+  ansible.builtin.assert:
+    that:
+      - "pve_gpu_inspection.files['/etc/modprobe.d/homelab-gpu-vfio.conf'] is search('(?m)^options vfio[-_]pci ids=' ~ (pve_gpu_devices | map(attribute='id') | join(',')) ~ '\\s*$')"
+      - "pve_gpu_inspection.files['/etc/modprobe.d/homelab-gpu-vfio.conf'] is search('(?m)^softdep snd_hda_intel pre: vfio[-_]pci\\s*$')"
+
+- name: Verify persistent module loading
+  ansible.builtin.assert:
+    that:
+      - "pve_gpu_inspection.files['/etc/modules-load.d/homelab-gpu-vfio.conf'] is search('(?m)^' ~ (item | replace('_', '[-_]')) ~ '\\s*$')"
+      - "pve_gpu_inspection.files['/etc/initramfs-tools/modules'] is search('(?m)^' ~ (item | replace('_', '[-_]')) ~ '\\s*$')"
+  loop: "{{ pve_gpu_modules }}"
+
+- name: Verify persistent NVIDIA driver blacklists
+  ansible.builtin.assert:
+    that:
+      - "pve_gpu_inspection.files['/etc/modprobe.d/homelab-gpu-vfio.conf'] is search('(?m)^blacklist ' ~ item ~ '\\s*$')"
+  loop: "{{ pve_gpu_blacklist }}"

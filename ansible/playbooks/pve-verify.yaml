@@ -1,0 +1,10 @@
+---
+- name: Verify Proxmox host-specific configuration without changing it
+  hosts: pve
+  gather_facts: true
+  tasks:
+    - name: Verify GPU passthrough on explicitly enabled hosts
+      ansible.builtin.include_role:
+        name: pve_gpu
+        tasks_from: verify
+      when: pve_gpu_passthrough_enabled | default(false) | bool

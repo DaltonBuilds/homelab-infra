@@ -1,0 +1,6 @@
+# HOMELAB-11: reserve RTX 5070 graphics and audio for the GPU VM.
+options vfio-pci ids={{ pve_gpu_devices | map(attribute='id') | join(',') }}
+softdep snd_hda_intel pre: vfio-pci
+{% for driver in pve_gpu_blacklist %}
+blacklist {{ driver }}
+{% endfor %}

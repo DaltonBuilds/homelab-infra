@@ -1,0 +1,12 @@
+---
+- name: Configure pve-07 GPU passthrough during explicit maintenance
+  hosts: pve-07
+  gather_facts: true
+  serial: 1
+  # A later task failure must not leave changed module files without an initramfs rebuild or pending marker.
+  force_handlers: true
+  tasks:
+    - name: Adopt the verified GPU configuration
+      ansible.builtin.import_role:
+        name: pve_gpu
+        tasks_from: configure

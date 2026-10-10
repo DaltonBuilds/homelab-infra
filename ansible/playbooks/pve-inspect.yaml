@@ -91,11 +91,11 @@
       register: zfs_arc_max
       when: inventory_hostname == 'pve-07'
 
-    - name: List NVIDIA devices
-      ansible.builtin.command: "/usr/bin/lspci -nn -d 10de:"
-      register: nvidia_devices
-      changed_when: false
-      when: inventory_hostname == 'pve-07'
+    - name: Inspect GPU configuration on explicitly enabled hosts
+      ansible.builtin.include_role:
+        name: pve_gpu
+        tasks_from: inspect
+      when: pve_gpu_passthrough_enabled | default(false) | bool
 
     - name: Report what this host is
       ansible.builtin.debug:
@@ -116,4 +116,4 @@
           network_interfaces: "{{ (network_interfaces.content | b64decode).splitlines() }}"
           apt_sources: "{{ pve_apt_sources | default({}) }}"
           zfs_arc_max: "{{ (zfs_arc_max.content | b64decode).strip() if inventory_hostname == 'pve-07' else 'n/a' }}"
-          nvidia_devices: "{{ nvidia_devices.stdout_lines if inventory_hostname == 'pve-07' else [] }}"
+          gpu: "{{ pve_gpu_inspection | default({}) }}"

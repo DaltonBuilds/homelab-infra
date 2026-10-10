@@ -1,0 +1,60 @@
+---
+- name: Inspect before changing GPU configuration
+  ansible.builtin.import_tasks: inspect.yaml
+
+- name: Validate hardware prerequisites
+  ansible.builtin.import_tasks: preflight.yaml
+
+- name: Require explicit maintenance acknowledgement
+  ansible.builtin.assert:
+    that:
+      - ansible_check_mode or (pve_gpu_maintenance_confirmed | default(false) | bool)
+    fail_msg: Review inspection/diff, console access, backups and quorum first; then set pve_gpu_maintenance_confirmed=true.
+
+- name: Check for an interrupted initramfs rebuild
+  ansible.builtin.stat:
+    path: /etc/initramfs-tools/.homelab-gpu-rebuild-pending
+  register: pve_gpu_pending_rebuild
+
+- name: Retry a previously interrupted initramfs rebuild
+  ansible.builtin.debug:
+    msg: A pending marker requires successful initramfs regeneration before reboot.
+  changed_when: pve_gpu_pending_rebuild.stat.exists
+  notify: Rebuild GPU boot images
+
+- name: Manage dedicated VFIO binding configuration
+  ansible.builtin.template:
+    src: homelab-gpu-vfio.conf.j2
+    dest: /etc/modprobe.d/homelab-gpu-vfio.conf
+    owner: root
+    group: root
+    mode: '0644'
+    backup: true
+  notify: Rebuild GPU boot images
+
+- name: Manage dedicated VFIO module loading
+  ansible.builtin.copy:
+    content: "{{ pve_gpu_modules | join('\n') }}\n"
+    dest: /etc/modules-load.d/homelab-gpu-vfio.conf
+    owner: root
+    group: root
+    mode: '0644'
+    backup: true
+  notify: Rebuild GPU boot images
+
+- name: Preserve unrelated initramfs entries and ensure early VFIO modules
+  ansible.builtin.lineinfile:
+    path: /etc/initramfs-tools/modules
+    line: "{{ item }}"
+    regexp: "^{{ item | replace('_', '[-_]') }}(?:\\s+#.*)?\\s*$"
+    state: present
+    backup: true
+  loop: "{{ pve_gpu_modules }}"
+  notify: Rebuild GPU boot images
+
+- name: Finish initramfs regeneration before reporting completion
+  ansible.builtin.meta: flush_handlers
+
+- name: Explain runtime activation
+  ansible.builtin.debug:
+    msg: Review changed files and initramfs results. If changed, reboot through explicit one-host maintenance, then run pve-verify.yaml. This play never reboots or changes kernel arguments.

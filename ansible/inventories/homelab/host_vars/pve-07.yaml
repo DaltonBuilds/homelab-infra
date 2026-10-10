@@ -1,0 +1,21 @@
+---
+# Verified in HOMELAB-11 on 2026-09-27; re-inspect before applying changes.
+pve_gpu_passthrough_enabled: true
+pve_gpu_devices:
+  - address: '0000:01:00.0'
+    id: '10de:2f04'
+  - address: '0000:01:00.1'
+    id: '10de:2f80'
+pve_gpu_modules:
+  - vfio
+  - vfio_iommu_type1
+  - vfio_pci
+pve_gpu_blacklist:
+  - nouveau
+  - nvidia
+  - nvidia_drm
+  - nvidia_modeset
+  - nvidia_uvm
+
+# Observe this cap; do not silently replace it with the older 10 GiB target.
+pve_zfs_arc_max_expected: 6647971840
