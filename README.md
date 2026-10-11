@@ -11,6 +11,7 @@ homelab-infra/
 ├── mise.toml                        # pinned ansible-core, yamllint, pre-commit
 ├── .yamllint.yaml                   # YAML document-start rule
 ├── .pre-commit-config.yaml
+├── docs/ansible-structure.md        # diagram of how playbooks, roles and inventory connect
 ├── ansible/
 │   ├── ansible.cfg
 │   ├── requirements.yml             # pinned collections, when added
@@ -22,7 +23,7 @@ homelab-infra/
 │       └── pve_gpu/                 # pve-07 GPU inspect, preflight, configure, verify
 ```
 
-From the repo root, `mise install` installs the pinned Ansible CLI. `mise.toml` points `ANSIBLE_CONFIG` at `ansible/ansible.cfg`. Galaxy collections install under `ansible/collections/`, which Git ignores; the current roles use only `ansible.builtin`. Shared values live in `inventories/homelab/group_vars/pve.yaml`; per-host differences live in `host_vars/`.
+From the repo root, `mise install` installs the pinned Ansible CLI. `mise.toml` points `ANSIBLE_CONFIG` at `ansible/ansible.cfg`. Galaxy collections install under `ansible/collections/`, which Git ignores; the current roles use only `ansible.builtin`. Shared values live in `inventories/homelab/group_vars/pve.yaml`; per-host differences live in `host_vars/`. See [Ansible structure](docs/ansible-structure.md) for a diagram of how the pieces connect.
 
 `mise run lint` checks that every YAML file starts with `---`. Install the same check as a Git hook with `mise exec -- pre-commit install`.
 
