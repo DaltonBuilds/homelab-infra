@@ -1,0 +1,4 @@
+---
+- name: Apply forwarding sysctl
+  ansible.builtin.command: /usr/sbin/sysctl -p /etc/sysctl.d/99-ts-router.conf
+  changed_when: true

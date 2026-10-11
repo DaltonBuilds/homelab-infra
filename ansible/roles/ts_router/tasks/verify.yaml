@@ -1,0 +1,45 @@
+---
+- name: Read Tailscale state
+  ansible.builtin.command: /usr/bin/tailscale status --json
+  register: ts_router_verify_status_raw
+  changed_when: false
+  check_mode: false
+
+- name: Note Tailscale state
+  ansible.builtin.set_fact:
+    ts_router_verify_status: "{{ ts_router_verify_status_raw.stdout | from_json }}"
+
+- name: Read IPv4 forwarding
+  ansible.builtin.command: /bin/cat /proc/sys/net/ipv4/ip_forward
+  register: ts_router_verify_forwarding
+  changed_when: false
+  check_mode: false
+
+# PrimaryRoutes lists routes the tailnet approved and this router currently serves.
+- name: Require a running, tagged router serving exactly the approved routes
+  ansible.builtin.assert:
+    that:
+      - ts_router_verify_status.BackendState == 'Running'
+      - ts_router_tag in (ts_router_verify_status.Self.Tags | default([], true))
+      - (ts_router_verify_status.Self.PrimaryRoutes | default([], true) | sort) == ts_router_routes
+      - ts_router_verify_forwarding.stdout | trim == '1'
+    fail_msg: >-
+      Router state is wrong: backend {{ ts_router_verify_status.BackendState }},
+      tags {{ ts_router_verify_status.Self.Tags | default([]) }},
+      served routes {{ ts_router_verify_status.Self.PrimaryRoutes | default([]) }},
+      forwarding {{ ts_router_verify_forwarding.stdout | trim }}.
+      Unserved routes usually mean the policy's autoApprovers did not match.
+
+- name: Require the LAN leg to reach every PVE UI and SSH port
+  ansible.builtin.wait_for:
+    host: "{{ item.0 }}"
+    port: "{{ item.1 }}"
+    timeout: 5
+  loop: "{{ groups['pve'] | map('extract', hostvars, 'ansible_host') | product([8006, 22]) | list }}"
+  loop_control:
+    label: "{{ item.0 }}:{{ item.1 }}"
+
+# Tagged nodes have key expiry disabled by default; a date here means it was re-enabled.
+- name: Report node key expiry
+  ansible.builtin.debug:
+    msg: "Node key expiry: {{ ts_router_verify_status.Self.KeyExpiry | default('disabled') }}"

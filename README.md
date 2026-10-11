@@ -16,12 +16,15 @@ homelab-infra/
 │   ├── ansible.cfg
 │   ├── requirements.yml             # pinned collections, when added
 │   ├── inventories/homelab/         # hosts, group_vars, host_vars
-│   ├── playbooks/                   # pve-inspect, pve-baseline, pve-verify, pve-update, pve-network, pve-gpu-configure
+│   ├── playbooks/                   # pve-*, plus ts-router and ts-router-verify
 │   └── roles/
 │       ├── pve_baseline/            # fleet APT, time, notification checks and verification
 │       ├── pve_update/              # gated one-host-at-a-time upgrade and reboot
 │       ├── pve_network/             # declared /etc/network/interfaces with automatic rollback
-│       └── pve_gpu/                 # pve-07 GPU inspect, preflight, configure, verify
+│       ├── pve_gpu/                 # pve-07 GPU inspect, preflight, configure, verify
+│       └── ts_router/               # Tailscale subnet router container on pve-03
+├── tailscale/policy.hujson          # tailnet policy, applied by GitHub Actions
+└── .github/workflows/               # tailscale-policy: test on PR, apply on merge
 ```
 
 From the repo root, `mise install` installs the pinned Ansible CLI. `mise.toml` points `ANSIBLE_CONFIG` at `ansible/ansible.cfg`. Galaxy collections install under `ansible/collections/`, which Git ignores; the current roles use only `ansible.builtin`. Shared values live in `inventories/homelab/group_vars/pve.yaml`; per-host differences live in `host_vars/`. See [Ansible structure](docs/ansible-structure.md) for a diagram of how the pieces connect.
@@ -140,6 +143,41 @@ The play manages the two dedicated `homelab-gpu-vfio.conf` files and preserves u
 Reboot separately through one-host maintenance, then rerun verification and check UI/SSH, quorum and ZFS health. A second configuration run should have no changes. If initramfs regeneration fails, do not reboot: fix the error and rerun the play to process the pending marker. The role never unloads/rebinds a live device, reboots, installs NVIDIA drivers or attaches a GPU to a guest. Guest attachment belongs to future OpenTofu provisioning; guest drivers/CUDA validation are separate.
 
 For rollback, restore the current run's backed-up files (or remove dedicated files newly created by that run), restore the complete original initramfs module list, regenerate initramfs successfully and reboot during maintenance. The older HOMELAB-11 rollback script is a point-in-time backup; review intervening changes before using it.
+
+## Remote management (Tailscale)
+
+Managed Tailscale (free Personal plan) gives the administrator TCP 8006 and 22 on the seven PVE management addresses from outside the LAN ([HOMELAB-39](https://daltonbuilds.youtrack.cloud/issue/HOMELAB-39)). Placement is decided in [HOMELAB-37](https://daltonbuilds.youtrack.cloud/issue/HOMELAB-37): `ts-router-01`, an unprivileged LXC (guest 110, 1 core, 256 MB, 4 GB) on pve-03 at `192.168.40.13`. Tailscale supplies network access only; Proxmox authentication, Proxmox MFA and SSH keys still apply.
+
+### Policy
+
+`tailscale/policy.hujson` is the entire tailnet policy. It grants `autogroup:owner` (on the Personal plan, only the account that owns the tailnet) 8006 and 22 on the seven hosts, auto-approves exactly those seven `/32` routes from `tag:pve-mgmt-router`, and has no default allow-all rule, so traffic between other tailnet devices is denied. Its `tests` block checks allowed and denied destinations on every save; a failing test rejects the policy.
+
+`.github/workflows/tailscale-policy.yaml` runs `test` on pull requests and `apply` on merge to `main`. It authenticates with GitHub's OIDC token through a Tailscale federated identity, so no Tailscale secret is stored in GitHub. One-time setup:
+
+1. In the Tailscale admin console, create a federated identity for GitHub Actions limited to this repository, with only the `policy_file` scope. Set repository variables `TS_FEDERATED_CLIENT_ID` and `TS_FEDERATED_AUDIENCE`.
+2. Paste the policy into the console once (its tests run there), then let the workflow own it. The action refuses to overwrite console edits made since its last apply; resolve those in Git.
+
+### Router
+
+```sh
+mise exec -- ansible-playbook ansible/playbooks/ts-router.yaml --check --diff
+TS_AUTHKEY=... mise exec -- ansible-playbook ansible/playbooks/ts-router.yaml --diff   # first run only
+mise exec -- ansible-playbook ansible/playbooks/ts-router-verify.yaml
+```
+
+The first play runs on pve-03. It refuses a guest ID used by anything else and an address that already answers, downloads the Debian 13 template, creates the container with `/dev/net/tun` passed through and the administrator public key for root, installs Python, and adds the container's host key to `~/.ssh/known_hosts`. That key is read over the verified SSH session to pve-03. On later runs it only checks that the container still matches inventory; it never changes or deletes it. Check mode stops after the first play until the container exists. When OpenTofu provisioning arrives, import guest 110 instead of recreating it; this guest is Tier 0 bootstrap infrastructure and must not depend on OpenBao or OpenTofu.
+
+The second play installs Tailscale from its stable repository (`present`, not `latest`), enables IPv4 forwarding inside the container only, and enrolls the router once with tag `tag:pve-mgmt-router`, the seven routes from inventory, SNAT on, Tailscale DNS, route acceptance and Tailscale SSH off. Later runs correct the advertised routes with `tailscale set` without a key. Verification requires a running tagged router serving exactly the approved routes, forwarding on, and 8006/22 reachable on every host from the container.
+
+**Enrollment key.** Generate it in the admin console just before the first run: single-use, pre-approved, tagged `tag:pve-mgmt-router`, shortest expiry. Pass it as `TS_AUTHKEY` in the environment of that run only; tasks that handle it use `no_log`. Do not reuse it.
+
+**Key expiry.** Tagged nodes have node-key expiry disabled by default, so the router does not drop off unattended. Verification prints the expiry so a re-enabled expiry shows up. Workstation and phone clients keep normal expiry and re-authenticate through the identity provider with MFA.
+
+**Revocation and re-enrollment.** Remove the device in the admin console, which stops access immediately. On the router run `tailscale logout`, then rerun the playbook with a new `TS_AUTHKEY`. Revoke a lost client the same way. Test this with a temporary client before relying on it.
+
+**Network path.** With SNAT on, PVE hosts see connections from `192.168.40.13`, so replies return without any UniFi route and PVE logs show the router address, not the tailnet client. PVE host firewalls (if enabled) must allow 8006/22 from `.13`. UniFi needs no port forward and no inbound rule; the router only makes outbound connections. On macOS the Tailscale app accepts subnet routes by default; on Linux clients use `--accept-routes`.
+
+**Failure and fallback.** If pve-03 or the container is down, remote access is down; vault-02 also lives on pve-03 but OpenBao keeps quorum. Manage from the LAN (VLAN 10 workstation to each host's UI/SSH) or the local console, then start the container with `pct start 110` on pve-03 or recreate it from this playbook. A VPN cannot start a powered-off host or repair a broken host network.
 
 ## Design references
 

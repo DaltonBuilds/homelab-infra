@@ -1,0 +1,149 @@
+---
+- name: Require the expected Debian release
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.distribution == 'Debian'
+      - ansible_facts.distribution_release == ts_router_debian_suite
+    fail_msg: Expected Debian {{ ts_router_debian_suite }}, found {{ ansible_facts.distribution }} {{ ansible_facts.distribution_release }}.
+
+- name: Install the Tailscale signing key
+  ansible.builtin.get_url:
+    url: "{{ ts_router_apt_key_url }}"
+    dest: "{{ ts_router_apt_key_path }}"
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Add the Tailscale stable repository
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/tailscale.sources
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      Types: deb
+      URIs: {{ ts_router_apt_uri }}
+      Suites: {{ ts_router_debian_suite }}
+      Components: main
+      Signed-By: {{ ts_router_apt_key_path }}
+  register: ts_router_apt_source
+
+# Present, not latest: upgrades are deliberate maintenance, like the PVE hosts.
+- name: Install Tailscale
+  ansible.builtin.apt:
+    name: tailscale
+    state: present
+    update_cache: "{{ ts_router_apt_source is changed }}"
+
+# Forwarding is per network namespace, so this changes the container only, not pve-03.
+- name: Enable IPv4 forwarding for subnet routing
+  ansible.builtin.copy:
+    dest: /etc/sysctl.d/99-ts-router.conf
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      # Managed by homelab-infra ts_router. Tailscale subnet routing needs forwarding.
+      net.ipv4.ip_forward = 1
+  notify: Apply forwarding sysctl
+
+- name: Apply forwarding before enrollment
+  ansible.builtin.meta: flush_handlers
+
+- name: Run tailscaled at boot
+  ansible.builtin.systemd_service:
+    name: tailscaled
+    enabled: true
+    state: started
+
+- name: Read Tailscale state
+  ansible.builtin.command: /usr/bin/tailscale status --json
+  register: ts_router_status_raw
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Note whether the router is enrolled
+  ansible.builtin.set_fact:
+    ts_router_enrolled: "{{ (ts_router_status_raw.stdout | default('{}', true) | from_json).BackendState | default('') == 'Running' }}"
+
+- name: Enroll the router
+  when: not ts_router_enrolled | bool
+  block:
+    - name: Require an auth key for enrollment
+      ansible.builtin.assert:
+        that:
+          - ts_router_auth_key | length > 0
+        fail_msg: >-
+          The router is not enrolled. Generate a pre-approved, single-use auth key tagged
+          {{ ts_router_tag }} with a short expiry and export it as TS_AUTHKEY for this run.
+        quiet: true
+
+    - name: Stage the auth key where only root can read it
+      ansible.builtin.copy:
+        content: "{{ ts_router_auth_key }}"
+        dest: /run/ts-router-authkey
+        owner: root
+        group: root
+        mode: '0600'
+      no_log: true
+
+    - name: Bring Tailscale up with the declared tag and routes
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/tailscale
+          - up
+          - --auth-key=file:/run/ts-router-authkey
+          - --hostname={{ ts_router_hostname }}
+          - --advertise-tags={{ ts_router_tag }}
+          - --advertise-routes={{ ts_router_routes | join(',') }}
+          # Replies return through the router without UniFi routes; PVE logs show the router's address.
+          - --snat-subnet-routes=true
+          # Keep name resolution independent of the tailnet, and do not route back into it.
+          - --accept-dns=false
+          - --accept-routes=false
+          - --ssh=false
+      no_log: true
+  always:
+    - name: Remove the staged auth key
+      ansible.builtin.file:
+        path: /run/ts-router-authkey
+        state: absent
+
+- name: Read Tailscale preferences
+  ansible.builtin.command: /usr/bin/tailscale debug prefs
+  register: ts_router_prefs_raw
+  changed_when: false
+  check_mode: false
+  when: ts_router_enrolled | bool
+
+- name: Note the advertised routes and tags
+  ansible.builtin.set_fact:
+    ts_router_prefs: "{{ ts_router_prefs_raw.stdout | from_json }}"
+  when: ts_router_enrolled | bool
+
+- name: Require the declared tag
+  ansible.builtin.assert:
+    that:
+      - ts_router_tag in (ts_router_prefs.AdvertiseTags | default([], true))
+    fail_msg: The router is enrolled without {{ ts_router_tag }}. Re-enroll it; see the README revocation procedure.
+  when: ts_router_enrolled | bool
+
+- name: Advertise exactly the declared routes
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/tailscale
+      - set
+      - --advertise-routes={{ ts_router_routes | join(',') }}
+      - --snat-subnet-routes=true
+      - --accept-dns=false
+      - --accept-routes=false
+      - --ssh=false
+  when:
+    - ts_router_enrolled | bool
+    - >-
+      (ts_router_prefs.AdvertiseRoutes | default([], true) | sort) != ts_router_routes
+      or ts_router_prefs.NoSNAT | default(false)
+      or ts_router_prefs.CorpDNS | default(false)
+      or ts_router_prefs.RouteAll | default(false)
+      or ts_router_prefs.RunSSH | default(false)

@@ -1,0 +1,29 @@
+---
+# HOMELAB-37 placement: unprivileged LXC on pve-03, the host with spare capacity.
+# Losing pve-03 removes remote access; local LAN and console management are the fallback.
+ansible_python_interpreter: /usr/bin/python3
+
+ts_router_pve_node: pve-03
+# 100 and 102 are bgp-01/bgp-02 (checked 2026-10-11). Keep this ID unique cluster-wide.
+ts_router_vmid: 110
+ts_router_template: debian-13-standard_13.6-1_amd64.tar.zst
+ts_router_rootfs_storage: local-lvm
+ts_router_disk_gb: 4
+ts_router_cores: 1
+ts_router_memory_mb: 256
+ts_router_swap_mb: 256
+
+# .13 did not answer ARP from pve-03 on 2026-10-11. Confirm it is outside the UniFi
+# VLAN 40 DHCP range before the first run.
+ts_router_address_prefix: 24
+ts_router_gateway: 192.168.40.1
+ts_router_dns_servers:
+  - 192.168.40.1
+ts_router_domain: homelab.internal
+
+# Public key only. Installed for root in the container at creation.
+ts_router_admin_ssh_public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICJhM8FK0OMcpiXpTPgry8BkoxlNSx6VrVuQKIyJYyVA homelab-admin"
+
+ts_router_tag: tag:pve-mgmt-router
+# Only the seven PVE management addresses, derived from inventory.
+ts_router_routes: "{{ groups['pve'] | map('extract', hostvars, 'ansible_host') | map('regex_replace', '$', '/32') | sort }}"

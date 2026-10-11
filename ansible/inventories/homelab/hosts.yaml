@@ -19,3 +19,10 @@ all:
           ansible_host: 192.168.40.66
       vars:
         ansible_user: root
+    # HOMELAB-37/39: Tailscale subnet router, an unprivileged LXC on pve-03.
+    ts_router:
+      hosts:
+        ts-router-01:
+          ansible_host: 192.168.40.13
+      vars:
+        ansible_user: root

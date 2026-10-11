@@ -1,0 +1,9 @@
+---
+- name: Verify the Tailscale router without changing it
+  hosts: ts_router
+  gather_facts: false
+  tasks:
+    - name: Verify the router
+      ansible.builtin.include_role:
+        name: ts_router
+        tasks_from: verify

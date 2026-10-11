@@ -17,6 +17,8 @@ flowchart LR
     update["pve-update.yaml<br/>upgrade and reboot, one host at a time"]
     netcfg["pve-network.yaml<br/>bridge maintenance, one host at a time"]
     gpucfg["pve-gpu-configure.yaml<br/>pve-07 maintenance"]
+    tsr["ts-router.yaml<br/>create container, enroll router"]
+    tsrver["ts-router-verify.yaml<br/>read-only checks"]
   end
 
   subgraph rb["roles/pve_baseline"]
@@ -54,6 +56,12 @@ flowchart LR
     ghand{{"handlers: rebuild initramfs"}}
   end
 
+  subgraph rt["roles/ts_router"]
+    tcont["container.yaml<br/>runs on pve-03"]
+    tconf["configure.yaml"]
+    tver["verify.yaml"]
+  end
+
   inv -.-> pb
 
   inspect -->|"pve-07 only"| ginsp
@@ -85,6 +93,11 @@ flowchart LR
   nconf --> nguest
   nver --> ntpl
 
+  tsr --> tcont
+  tsr --> tconf
+  tsr -->|"after enrollment"| tver
+  tsrver --> tver
+
   gconf --> ginsp --> gpy
   gconf --> gpre
   gconf --> gtpl
@@ -102,4 +115,4 @@ Solid arrows mean "runs". The dashed arrow from the inventory means every playbo
 - **Roles** group the work. Entry task files such as `converge.yaml` pull in smaller task files. Those use the role's `files/` (scripts piped to the host's Python, never installed) and `templates/` (files rendered with inventory values).
 - **Shared checks.** `pve_baseline/verify.yaml` is the acceptance check for every host. `pve-verify.yaml` runs it on demand, and `pve-baseline.yaml` and `pve-update.yaml` run it after each host before moving on. `pve_update` and `pve_network` reuse the baseline preflight, so updates and network changes require the same identity and full-quorum checks as configuration changes. `pve_network/verify.yaml` is the network acceptance check; `pve-verify.yaml` and `pve-network.yaml` run it, and it compares the live file with the template so UI edits show up as drift.
 
-Only `pve-baseline.yaml`, `pve-update.yaml`, `pve-network.yaml` and `pve-gpu-configure.yaml` change hosts. The last three also require a confirmation variable for a real run.
+Only `pve-baseline.yaml`, `pve-update.yaml`, `pve-network.yaml`, `pve-gpu-configure.yaml` and `ts-router.yaml` change hosts. `ts-router.yaml` creates one container on pve-03 and configures it; it does not change the PVE host's own configuration. The last three also require a confirmation variable for a real run.

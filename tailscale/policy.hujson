@@ -1,0 +1,80 @@
+// Tailnet policy for restricted PVE remote management (ADR-013, HOMELAB-39).
+// Applied by .github/workflows/tailscale-policy.yaml. Console edits are overwritten.
+//
+// This file is the whole policy: anything not granted below is denied, including
+// traffic between your own tailnet devices. There is no default allow-all rule.
+//
+// Identities are role autogroups, never logins, because this repository is public.
+// On the Personal plan autogroup:owner is only the account that owns the tailnet;
+// invited users are members, not owners.
+{
+	"hosts": {
+		"pve-01": "192.168.40.50",
+		"pve-02": "192.168.40.55",
+		"pve-03": "192.168.40.58",
+		"pve-04": "192.168.40.59",
+		"pve-05": "192.168.40.64",
+		"pve-06": "192.168.40.65",
+		"pve-07": "192.168.40.66",
+	},
+
+	"tagOwners": {
+		"tag:pve-mgmt-router": ["autogroup:admin"],
+	},
+
+	// Only the router tag may advertise these routes, and only these /32s are approved
+	// automatically. Anything else it advertises stays unapproved.
+	"autoApprovers": {
+		"routes": {
+			"192.168.40.50/32": ["tag:pve-mgmt-router"],
+			"192.168.40.55/32": ["tag:pve-mgmt-router"],
+			"192.168.40.58/32": ["tag:pve-mgmt-router"],
+			"192.168.40.59/32": ["tag:pve-mgmt-router"],
+			"192.168.40.64/32": ["tag:pve-mgmt-router"],
+			"192.168.40.65/32": ["tag:pve-mgmt-router"],
+			"192.168.40.66/32": ["tag:pve-mgmt-router"],
+		},
+	},
+
+	// Web UI, noVNC/xterm.js consoles (proxied over 8006) and SSH. Nothing else.
+	"grants": [
+		{
+			"src": ["autogroup:owner"],
+			"dst": ["pve-01", "pve-02", "pve-03", "pve-04", "pve-05", "pve-06", "pve-07"],
+			"ip":  ["tcp:8006", "tcp:22"],
+		},
+	],
+
+	// Checked on every save. A failing test rejects the whole policy.
+	"tests": [
+		{
+			"src": "autogroup:owner",
+			"accept": [
+				"192.168.40.50:8006", "192.168.40.50:22",
+				"192.168.40.55:8006", "192.168.40.55:22",
+				"192.168.40.58:8006", "192.168.40.58:22",
+				"192.168.40.59:8006", "192.168.40.59:22",
+				"192.168.40.64:8006", "192.168.40.64:22",
+				"192.168.40.65:8006", "192.168.40.65:22",
+				"192.168.40.66:8006", "192.168.40.66:22",
+			],
+			"deny": [
+				// Other ports on a PVE host: SPICE proxy, HTTPS, corosync.
+				"192.168.40.50:3128", "192.168.40.50:443", "192.168.40.66:5405",
+				// Other VLAN 40 services and the gateway.
+				"192.168.40.1:443", "192.168.40.10:22", "192.168.40.20:8200",
+				// The router itself and guest VLANs.
+				"192.168.40.13:22", "192.168.50.30:6443",
+			],
+		},
+		{
+			// The router tag is a route carrier, not a management identity.
+			"src": "tag:pve-mgmt-router",
+			"deny": ["192.168.40.50:8006", "192.168.40.50:22"],
+		},
+		{
+			"src": "unauthorized@example.com",
+			"deny": ["192.168.40.50:8006", "192.168.40.50:22", "192.168.40.66:8006"],
+		},
+	],
+}

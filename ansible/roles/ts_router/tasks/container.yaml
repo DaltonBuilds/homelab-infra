@@ -1,0 +1,136 @@
+---
+# Runs against the router inventory host; every task executes on its PVE node.
+- name: Read cluster guests
+  ansible.builtin.command: /usr/bin/pvesh get /cluster/resources --type vm --output-format json
+  register: ts_router_guests_raw
+  changed_when: false
+  check_mode: false
+  delegate_to: "{{ ts_router_pve_node }}"
+
+- name: Find the guest that holds the router ID
+  ansible.builtin.set_fact:
+    ts_router_guest: "{{ ts_router_guests_raw.stdout | from_json | selectattr('vmid', 'equalto', ts_router_vmid | int) | first | default({}) }}"
+
+- name: Refuse to reuse a guest ID that belongs to something else
+  ansible.builtin.assert:
+    that:
+      - ts_router_guest == {} or (ts_router_guest.type == 'lxc' and ts_router_guest.name == ts_router_hostname and ts_router_guest.node == ts_router_pve_node)
+    fail_msg: >-
+      Guest {{ ts_router_vmid }} is {{ ts_router_guest.type | default('') }} {{ ts_router_guest.name | default('') }}
+      on {{ ts_router_guest.node | default('') }}. Pick an unused ts_router_vmid.
+
+- name: Check that nothing answers on the router address yet
+  ansible.builtin.command: /usr/bin/ping -c 2 -W 1 {{ ansible_host }}
+  register: ts_router_address_probe
+  changed_when: false
+  failed_when: ts_router_address_probe.rc == 0
+  check_mode: false
+  delegate_to: "{{ ts_router_pve_node }}"
+  when: ts_router_guest == {}
+
+- name: Download the container template
+  ansible.builtin.shell: /usr/bin/pveam update && /usr/bin/pveam download local {{ ts_router_template }}
+  args:
+    creates: /var/lib/vz/template/cache/{{ ts_router_template }}
+  delegate_to: "{{ ts_router_pve_node }}"
+  when: ts_router_guest == {}
+
+- name: Stage the administrator public key for container creation
+  ansible.builtin.copy:
+    content: "{{ ts_router_admin_ssh_public_key }}\n"
+    dest: /root/homelab-ts-router.pub
+    owner: root
+    group: root
+    mode: '0600'
+  delegate_to: "{{ ts_router_pve_node }}"
+  when: ts_router_guest == {}
+
+- name: Create and start the unprivileged router container
+  ansible.builtin.command:
+    argv:
+      - /usr/sbin/pct
+      - create
+      - "{{ ts_router_vmid }}"
+      - "local:vztmpl/{{ ts_router_template }}"
+      - --hostname
+      - "{{ ts_router_hostname }}"
+      - --description
+      - Tailscale subnet router for PVE management. Managed by homelab-infra ts-router.yaml (HOMELAB-39).
+      - --tags
+      - tailscale
+      - --unprivileged
+      - "1"
+      - --features
+      - nesting=1
+      # tailscaled needs a TUN device to route; the host's /dev/net/tun is passed through.
+      - --dev0
+      - /dev/net/tun
+      - --cores
+      - "{{ ts_router_cores }}"
+      - --memory
+      - "{{ ts_router_memory_mb }}"
+      - --swap
+      - "{{ ts_router_swap_mb }}"
+      - --rootfs
+      - "{{ ts_router_rootfs_storage }}:{{ ts_router_disk_gb }}"
+      # Untagged on vmbr0: VLAN 40 is native on the host port.
+      - --net0
+      - "name=eth0,bridge={{ hostvars[ts_router_pve_node].pve_baseline_bridge }},ip={{ ansible_host }}/{{ ts_router_address_prefix }},gw={{ ts_router_gateway }}"
+      - --nameserver
+      - "{{ ts_router_dns_servers | join(' ') }}"
+      - --searchdomain
+      - "{{ ts_router_domain }}"
+      - --ssh-public-keys
+      - /root/homelab-ts-router.pub
+      - --onboot
+      - "1"
+      - --start
+      - "1"
+  delegate_to: "{{ ts_router_pve_node }}"
+  when: ts_router_guest == {}
+
+- name: Read the container configuration
+  ansible.builtin.command: /usr/sbin/pct config {{ ts_router_vmid }}
+  register: ts_router_pct_config
+  changed_when: false
+  check_mode: false
+  delegate_to: "{{ ts_router_pve_node }}"
+  when: ts_router_guest != {} or not ansible_check_mode
+
+- name: Require the container to match inventory
+  ansible.builtin.assert:
+    that:
+      - ts_router_pct_config.stdout is search('(?m)^unprivileged:\s1$')
+      - ts_router_pct_config.stdout is search('(?m)^onboot:\s1$')
+      - ts_router_pct_config.stdout is search('(?m)^dev0:\s/dev/net/tun$')
+      - ts_router_pct_config.stdout is search('(?m)^cores:\s' ~ ts_router_cores ~ '$')
+      - ts_router_pct_config.stdout is search('(?m)^memory:\s' ~ ts_router_memory_mb ~ '$')
+      - ts_router_pct_config.stdout is search('(?m)^net0:\s.*ip=' ~ (ansible_host | regex_escape) ~ '/' ~ ts_router_address_prefix ~ '(,|$)')
+    fail_msg: Container {{ ts_router_vmid }} differs from inventory. Review `pct config {{ ts_router_vmid }}`; this play does not change an existing container.
+  when: ts_router_pct_config is not skipped
+
+- name: Install Python in the container so Ansible can manage it
+  ansible.builtin.command: >-
+    /usr/sbin/pct exec {{ ts_router_vmid }} -- /bin/sh -c
+    'command -v python3 >/dev/null && echo present || (apt-get update -q && apt-get install -y -q python3 >/dev/null && echo installed)'
+  register: ts_router_python
+  changed_when: "'installed' in ts_router_python.stdout"
+  delegate_to: "{{ ts_router_pve_node }}"
+  when: not ansible_check_mode
+
+# The host key is read over the verified SSH session to the PVE node, so trusting it
+# here keeps the chain of verified host keys intact.
+- name: Read the container's SSH host key
+  ansible.builtin.command: /usr/sbin/pct exec {{ ts_router_vmid }} -- /bin/cat /etc/ssh/ssh_host_ed25519_key.pub
+  register: ts_router_host_key
+  changed_when: false
+  delegate_to: "{{ ts_router_pve_node }}"
+  when: not ansible_check_mode
+
+- name: Trust the container's host key on the workstation
+  ansible.builtin.known_hosts:
+    name: "{{ ansible_host }}"
+    key: "{{ ansible_host }} {{ ts_router_host_key.stdout.split()[:2] | join(' ') }}"
+    state: present
+  delegate_to: localhost
+  when: not ansible_check_mode
