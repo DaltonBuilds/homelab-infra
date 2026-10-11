@@ -1,0 +1,12 @@
+---
+- name: Read the configured timezone
+  ansible.builtin.command: /usr/bin/timedatectl show --property=Timezone --value
+  register: pve_baseline_current_timezone
+  changed_when: false
+  check_mode: false
+
+- name: Set the timezone
+  ansible.builtin.command:
+    argv: [/usr/bin/timedatectl, set-timezone, "{{ pve_baseline_timezone }}"]
+  changed_when: true
+  when: pve_baseline_current_timezone.stdout != pve_baseline_timezone

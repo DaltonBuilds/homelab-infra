@@ -1,0 +1,15 @@
+---
+- name: Validate identity and cluster health
+  ansible.builtin.import_tasks: preflight.yaml
+
+- name: Converge APT repositories
+  ansible.builtin.import_tasks: apt.yaml
+
+- name: Stop suppressing the subscription reminder
+  ansible.builtin.import_tasks: subscription_reminder.yaml
+
+- name: Converge time settings
+  ansible.builtin.import_tasks: time.yaml
+
+- name: Check notification configuration
+  ansible.builtin.import_tasks: notifications.yaml

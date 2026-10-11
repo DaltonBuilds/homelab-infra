@@ -15,13 +15,74 @@ homelab-infra/
 │   ├── ansible.cfg
 │   ├── requirements.yml             # pinned collections, when added
 │   ├── inventories/homelab/         # hosts, group_vars, host_vars
-│   ├── playbooks/                   # pve-inspect, pve-verify, pve-gpu-configure; pve-baseline planned
-│   └── roles/pve_gpu/               # pve-07 GPU inspect, preflight, configure, verify
+│   ├── playbooks/                   # pve-inspect, pve-baseline, pve-verify, pve-update, pve-gpu-configure
+│   └── roles/
+│       ├── pve_baseline/            # fleet APT, time, notification checks and verification
+│       ├── pve_update/              # gated one-host-at-a-time upgrade and reboot
+│       └── pve_gpu/                 # pve-07 GPU inspect, preflight, configure, verify
 ```
 
-From the repo root, `mise install` installs the pinned Ansible CLI. `mise.toml` points `ANSIBLE_CONFIG` at `ansible/ansible.cfg`. Galaxy collections install under `ansible/collections/`, which Git ignores. The `pve_gpu` role shares GPU inspection and verification between playbooks.
+From the repo root, `mise install` installs the pinned Ansible CLI. `mise.toml` points `ANSIBLE_CONFIG` at `ansible/ansible.cfg`. Galaxy collections install under `ansible/collections/`, which Git ignores; the current roles use only `ansible.builtin`. Shared values live in `inventories/homelab/group_vars/pve.yaml`; per-host differences live in `host_vars/`.
 
 `mise run lint` checks that every YAML file starts with `---`. Install the same check as a Git hook with `mise exec -- pre-commit install`.
+
+Every host must have a verified SSH host key in `~/.ssh/known_hosts`. If a reinstalled host's key changed, compare the fingerprint shown by `ssh-keygen -lf /etc/ssh/ssh_host_ecdsa_key.pub` at its local console before replacing the old entry.
+
+## Fleet baseline
+
+```sh
+mise exec -- ansible-playbook ansible/playbooks/pve-inspect.yaml
+mise exec -- ansible-playbook ansible/playbooks/pve-verify.yaml
+mise exec -- ansible-playbook ansible/playbooks/pve-baseline.yaml --check --diff --limit pve-02
+mise exec -- ansible-playbook ansible/playbooks/pve-baseline.yaml --diff --limit pve-02
+```
+
+Start with one healthy canary, run it a second time to confirm `changed=0`, then adopt the other hosts. `pve-baseline.yaml` runs one host at a time and stops the whole play at the first failure. Before changing a host it requires the inventory hostname, FQDN, address, gateway and Debian release to match, and the cluster to be quorate with all seven votes. After changing a host it runs the same checks as `pve-verify.yaml`.
+
+A baseline run:
+
+- disables enabled enterprise, Ceph and test APT entries in `.list` or deb822 `.sources` files, keeps Debian and security sources, adds one `pve-no-subscription` entry only if none exists, and runs `apt-get update --error-on=any`. It stops for review if an entry to disable shares a file with other stanzas, more than one no-subscription entry is enabled, a suite is not `trixie`, or signature checking is bypassed;
+- removes the post-install helper's `no-nag-script` APT hook and `pve-remove-nag.sh`, which re-patch the UI after every package operation;
+- sets the timezone and checks that the notification target exists;
+- copies each file to `/root/homelab-baseline-backup/` on the host before its first change.
+
+It never upgrades or reboots a host, changes networking, storage or cluster membership, rewrites root's authorized keys (cluster-shared under `/etc/pve/priv`), or changes SSH daemon or firewall settings. Verification checks APT, identity, quorum, absence of HA resources, cluster services, node-local storage, the management bridge and its VLAN-awareness, resolver and name resolution, time synchronization, the administrator key fingerprint and pve-07's runtime and persistent ARC cap. It also fails on APT drift: an enabled repository outside the known kinds (allow deliberate ones in `pve_baseline_apt_allowed_other_uris`), or Debian components other than `main contrib non-free-firmware`. It reports firewall status and whether the packaged UI files are still modified.
+
+Check mode limitations: commands that change state (`apt-get update`, `timedatectl set-timezone`, the test notification) are skipped, backup copies are not simulated, and post-change verification is skipped because predicted changes have not happened. Read-only inspection still runs.
+
+Send a test notification after the target delivers mail. Confirm receipt by hand:
+
+```sh
+mise exec -- ansible-playbook ansible/playbooks/pve-baseline.yaml --limit pve-02 -e pve_baseline_notification_test=true
+```
+
+### Maintenance procedures
+
+These are deliberately outside a baseline run. Do them one host at a time with local console access, confirm `pvecm status` is quorate with all votes before and after, and stop if a host fails `pve-verify.yaml`.
+
+- **Restore the subscription reminder.** Removing the helper hook stops new patching, but `proxmoxlib.js` stays modified until `proxmox-widget-toolkit` is reinstalled or upgraded. Either upgrade during update maintenance, or reinstall the installed version: `apt-get install --reinstall proxmox-widget-toolkit=$(dpkg-query -W -f='${Version}' proxmox-widget-toolkit)`. Then confirm `dpkg --verify proxmox-widget-toolkit` prints nothing.
+- **Updates.** Use `pve-update.yaml`, below. Match a rebuilt node's update level to the surviving members before joining it.
+- **Network, firewall or bridge changes.** Back up `/etc/network/interfaces`, keep console access, apply with `ifreload -a`, and roll back from the console if management access is lost. Update `pve_baseline_bridge_vlan_aware` only after deliberately changing the bridge.
+- **Rollback of a baseline run.** Copy files back from `/root/homelab-baseline-backup/` to their original paths and run `apt-get update`.
+
+### Updates
+
+```sh
+mise exec -- ansible-playbook ansible/playbooks/pve-update.yaml --check
+mise exec -- ansible-playbook ansible/playbooks/pve-update.yaml -e pve_update_maintenance_confirmed=true
+```
+
+`pve-update.yaml` aligns versions by upgrading every host to the latest packages in the same session, one host at a time. For each host it:
+
+1. runs the baseline preflight (identity, quorate cluster with all votes) and requires the maintenance acknowledgement;
+2. stops if guests are running, because a reboot shuts them down. Stop or move them, or pass `-e pve_update_allow_running_guests=true` to accept the shutdown. It also stops if a GPU initramfs rebuild is pending;
+3. runs `apt-get update --error-on=any` and `apt-get dist-upgrade` without prompts, keeping local configuration files;
+4. reboots only if the running kernel is older than the newest installed one or a package requested it, then waits for SSH, `pve-cluster`, `pveproxy` and full quorum;
+5. runs `pve-verify.yaml`'s checks, including GPU verification on pve-07, before moving to the next host.
+
+It ends by reporting each host's `pveversion` and whether they all match. Run it across all hosts in one session so they land on the same versions; a `--limit` run updates only those hosts.
+
+Check mode lists the hosts with pending upgrades but decides about rebooting from the kernels installed now; a real run decides after upgrading, so a newly installed kernel also triggers a reboot. A pinned kernel (`proxmox-boot-tool kernel pin`) makes the newest-kernel comparison reboot every run; unpin it or limit those hosts out.
 
 ## pve-07 GPU adoption
 
@@ -34,7 +95,7 @@ mise exec -- ansible-playbook ansible/playbooks/pve-inspect.yaml --limit pve-07
 mise exec -- ansible-playbook ansible/playbooks/pve-verify.yaml --limit pve-07
 ```
 
-`pve-verify.yaml` currently verifies the GPU-specific portion only; it is not full fleet-baseline acceptance. It checks runtime binding and persistent module/binding/blacklist configuration. Read-only GPU commands run even in check mode. Reports contain host configuration; keep captured output out of Git and review it before sharing.
+On GPU hosts, `pve-verify.yaml` also checks runtime binding and persistent module/binding/blacklist configuration. Read-only GPU commands run even in check mode. Reports contain host configuration; keep captured output out of Git and review it before sharing.
 
 Review the configuration diff without changing files:
 

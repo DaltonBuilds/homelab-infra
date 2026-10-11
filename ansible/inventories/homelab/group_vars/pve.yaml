@@ -1,0 +1,28 @@
+---
+# Values observed on pve-02..pve-07 by pve-inspect.yaml on 2026-10-10.
+ansible_python_interpreter: /usr/bin/python3
+
+pve_baseline_timezone: America/Denver
+pve_baseline_domain: homelab.internal
+pve_baseline_gateway: 192.168.40.1
+pve_baseline_dns_servers:
+  - 192.168.40.1
+pve_baseline_debian_suite: trixie
+
+# Public key fingerprint only; the private key stays on the workstation.
+pve_baseline_admin_ssh_key_fingerprints:
+  - SHA256:nCGnq5KMJOIOSpAXbgIkEi28Xz01eiQcO5zABF7d9lk
+
+pve_baseline_cluster_name: homelab-pve
+pve_baseline_cluster_expected_votes: 7
+
+pve_baseline_bridge: vmbr0
+# Every host currently runs vmbr0 without VLAN filtering; guest tags use Proxmox's
+# traditional per-VLAN bridges. Changing this is network maintenance, not convergence.
+pve_baseline_bridge_vlan_aware: false
+
+pve_baseline_storage_active:
+  - local
+  - local-lvm
+
+pve_baseline_notification_target: mail-to-root

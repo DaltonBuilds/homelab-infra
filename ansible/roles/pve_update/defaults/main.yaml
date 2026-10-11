@@ -1,0 +1,10 @@
+---
+# Must be set on the command line for a real run.
+pve_update_maintenance_confirmed: false
+
+# Proxmox shuts running guests down during a host reboot; allow that only on purpose.
+pve_update_allow_running_guests: false
+
+pve_update_reboot_timeout: 900
+pve_update_quorum_retries: 30
+pve_update_quorum_delay: 10

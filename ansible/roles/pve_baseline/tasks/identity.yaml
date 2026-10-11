@@ -1,0 +1,11 @@
+---
+- name: Require the host to match its inventory identity
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.hostname == inventory_hostname
+      - ansible_facts.fqdn == inventory_hostname ~ '.' ~ pve_baseline_domain
+      - ansible_facts.default_ipv4.address == ansible_host
+      - ansible_facts.default_ipv4.interface == pve_baseline_bridge
+      - ansible_facts.default_ipv4.gateway == pve_baseline_gateway
+      - ansible_facts.distribution_release == pve_baseline_debian_suite
+    fail_msg: Hostname, address, gateway or release differs from inventory. Never rename or re-address a clustered host from this role.

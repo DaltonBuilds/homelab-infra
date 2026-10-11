@@ -1,0 +1,38 @@
+---
+- name: Update and reboot Proxmox hosts one at a time during explicit maintenance
+  hosts: pve
+  gather_facts: true
+  serial: 1
+  any_errors_fatal: true
+  tasks:
+    - name: Update this host
+      ansible.builtin.import_role:
+        name: pve_update
+        tasks_from: upgrade
+
+    - name: Verify the fleet baseline after updating
+      ansible.builtin.include_role:
+        name: pve_baseline
+        tasks_from: verify
+      when: not ansible_check_mode
+
+    - name: Verify GPU passthrough after updating
+      ansible.builtin.include_role:
+        name: pve_gpu
+        tasks_from: verify
+      when:
+        - not ansible_check_mode
+        - pve_gpu_passthrough_enabled | default(false) | bool
+
+- name: Report version alignment across the updated hosts
+  hosts: pve
+  gather_facts: false
+  tasks:
+    - name: Compare Proxmox versions
+      ansible.builtin.debug:
+        msg:
+          aligned: "{{ versions.values() | unique | length == 1 }}"
+          versions: "{{ versions }}"
+      vars:
+        versions: "{{ dict(ansible_play_hosts | zip(ansible_play_hosts | map('extract', hostvars, ['pve_update_version', 'stdout']))) }}"
+      run_once: true

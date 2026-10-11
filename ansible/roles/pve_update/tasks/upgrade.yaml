@@ -1,0 +1,109 @@
+---
+- name: Validate identity and require full cluster health
+  ansible.builtin.include_role:
+    name: pve_baseline
+    tasks_from: preflight
+
+- name: Require explicit maintenance acknowledgement
+  ansible.builtin.assert:
+    that:
+      - ansible_check_mode or (pve_update_maintenance_confirmed | bool)
+    fail_msg: Review the check-mode run, confirm console access and quorum, then set pve_update_maintenance_confirmed=true.
+
+- name: List running guests on this host
+  ansible.builtin.command: /usr/bin/pvesh get /nodes/{{ inventory_hostname }}/{{ item }} --output-format json
+  loop: [qemu, lxc]
+  register: pve_update_guests
+  changed_when: false
+  check_mode: false
+
+- name: Record running guests
+  ansible.builtin.set_fact:
+    pve_update_running_guests: >-
+      {{ pve_update_guests.results | map(attribute='stdout') | map('from_json') | flatten
+         | selectattr('status', 'equalto', 'running')
+         | map(attribute='vmid') | map('string') | list }}
+
+- name: Require no running guests unless their shutdown is accepted
+  ansible.builtin.assert:
+    that:
+      - pve_update_running_guests | length == 0 or (pve_update_allow_running_guests | bool)
+    fail_msg: >-
+      Guests {{ pve_update_running_guests | join(', ') }} are running and would be shut down by the reboot.
+      Stop or move them, or set pve_update_allow_running_guests=true.
+
+- name: Check for an unfinished GPU initramfs rebuild
+  ansible.builtin.stat:
+    path: /etc/initramfs-tools/.homelab-gpu-rebuild-pending
+  register: pve_update_gpu_pending
+
+- name: Refuse to update over an unfinished GPU initramfs rebuild
+  ansible.builtin.assert:
+    that:
+      - not pve_update_gpu_pending.stat.exists
+    fail_msg: Run pve-gpu-configure.yaml to finish the pending initramfs rebuild first.
+
+- name: Refresh package lists, treating signature and repository warnings as errors
+  ansible.builtin.command: /usr/bin/apt-get update --error-on=any
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Apply all Proxmox and Debian updates
+  ansible.builtin.apt:
+    upgrade: dist
+    dpkg_options: force-confdef,force-confold
+  register: pve_update_apt
+
+- name: Read the running and newest installed kernels
+  ansible.builtin.shell: |
+    set -o pipefail
+    uname -r
+    linux-version list | linux-version sort | tail -n 1
+  args:
+    executable: /bin/bash
+  register: pve_update_kernels
+  changed_when: false
+  check_mode: false
+
+- name: Check whether packages requested a reboot
+  ansible.builtin.stat:
+    path: /run/reboot-required
+  register: pve_update_reboot_required
+
+- name: Decide whether to reboot
+  ansible.builtin.set_fact:
+    pve_update_needs_reboot: >-
+      {{ pve_update_kernels.stdout_lines[0] != pve_update_kernels.stdout_lines[1]
+         or pve_update_reboot_required.stat.exists }}
+
+- name: Report the update decision
+  ansible.builtin.debug:
+    msg:
+      running_guests: "{{ pve_update_running_guests }}"
+      packages_changed: "{{ pve_update_apt.changed }}"
+      running_kernel: "{{ pve_update_kernels.stdout_lines[0] }}"
+      newest_kernel: "{{ pve_update_kernels.stdout_lines[1] }}"
+      reboot: "{{ pve_update_needs_reboot }}"
+
+- name: Reboot into the updated kernel
+  ansible.builtin.reboot:
+    reboot_timeout: "{{ pve_update_reboot_timeout }}"
+    test_command: /usr/bin/systemctl is-active pve-cluster pveproxy
+  when: pve_update_needs_reboot | bool
+
+- name: Wait for the host to rejoin a fully healthy cluster
+  ansible.builtin.command: /usr/bin/pvecm status
+  register: pve_update_quorum
+  changed_when: false
+  check_mode: false
+  until:
+    - pve_update_quorum.stdout is search('(?m)^Quorate:\s+Yes\s*$')
+    - pve_update_quorum.stdout is search('(?m)^Total votes:\s+' ~ pve_baseline_cluster_expected_votes ~ '\s*$')
+  retries: "{{ pve_update_quorum_retries }}"
+  delay: "{{ pve_update_quorum_delay }}"
+
+- name: Record the Proxmox version after updating
+  ansible.builtin.command: /usr/bin/pveversion
+  register: pve_update_version
+  changed_when: false
+  check_mode: false

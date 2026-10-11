@@ -1,0 +1,16 @@
+---
+- name: Inventory APT sources
+  ansible.builtin.command:
+    argv: [/usr/bin/python3, '-']
+    stdin: "{{ lookup('ansible.builtin.file', 'apt_sources.py') }}"
+  register: pve_baseline_apt_command
+  changed_when: false
+  check_mode: false
+
+- name: Classify APT sources
+  ansible.builtin.set_fact:
+    pve_baseline_apt: "{{ apt_entries }}"
+    pve_baseline_apt_unwanted: "{{ apt_entries | selectattr('enabled') | selectattr('kind', 'in', pve_baseline_apt_disabled_kinds) | list }}"
+    pve_baseline_apt_no_subscription: "{{ apt_entries | selectattr('enabled') | selectattr('kind', 'equalto', 'pve-no-subscription') | list }}"
+  vars:
+    apt_entries: "{{ (pve_baseline_apt_command.stdout | from_json).entries }}"

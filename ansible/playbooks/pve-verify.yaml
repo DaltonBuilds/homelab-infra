@@ -1,8 +1,13 @@
 ---
-- name: Verify Proxmox host-specific configuration without changing it
+- name: Verify Proxmox host configuration without changing it
   hosts: pve
   gather_facts: true
   tasks:
+    - name: Verify the fleet baseline
+      ansible.builtin.include_role:
+        name: pve_baseline
+        tasks_from: verify
+
     - name: Verify GPU passthrough on explicitly enabled hosts
       ansible.builtin.include_role:
         name: pve_gpu

@@ -1,0 +1,33 @@
+---
+# APT entry kinds (from files/apt_sources.py) that must not stay enabled.
+pve_baseline_apt_disabled_kinds:
+  - enterprise
+  - ceph
+  - pve-test
+pve_baseline_apt_required_kinds:
+  - debian
+  - debian-security
+  - pve-no-subscription
+pve_baseline_apt_debian_components:
+  - main
+  - contrib
+  - non-free-firmware
+# URIs of enabled repositories outside the kinds above that were added on purpose.
+pve_baseline_apt_allowed_other_uris: []
+
+# Left by the community post-install helper; it re-patches the UI after every dpkg run.
+pve_baseline_nag_removal_files:
+  - /etc/apt/apt.conf.d/no-nag-script
+  - /usr/local/bin/pve-remove-nag.sh
+pve_baseline_backup_dir: /root/homelab-baseline-backup
+
+pve_baseline_cluster_services:
+  - corosync
+  - pve-cluster
+  - pvedaemon
+  - pveproxy
+  - pve-ha-crm
+  - pve-ha-lrm
+
+# Sends a real message through the configured target; confirm delivery by hand.
+pve_baseline_notification_test: false

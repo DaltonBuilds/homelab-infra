@@ -19,3 +19,7 @@ pve_gpu_blacklist:
 
 # Observe this cap; do not silently replace it with the older 10 GiB target.
 pve_zfs_arc_max_expected: 6647971840
+
+pve_baseline_storage_active:
+  - local
+  - local-zfs

@@ -1,0 +1,40 @@
+---
+- name: Find post-install helper files that suppress the subscription reminder
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop: "{{ pve_baseline_nag_removal_files }}"
+  register: pve_baseline_nag_files
+
+- name: Create backup directories for helper files
+  ansible.builtin.file:
+    path: "{{ pve_baseline_backup_dir }}{{ item.item | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+  loop: "{{ pve_baseline_nag_files.results | selectattr('stat.exists') | list }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Keep a copy of each helper file before removing it
+  ansible.builtin.copy:
+    src: "{{ item.item }}"
+    dest: "{{ pve_baseline_backup_dir }}{{ item.item }}"
+    remote_src: true
+    force: false
+    owner: root
+    group: root
+    mode: '0600'
+  loop: "{{ pve_baseline_nag_files.results | selectattr('stat.exists') | list }}"
+  loop_control:
+    label: "{{ item.item }}"
+  # The backup directory is only predicted in check mode, so the copy cannot be simulated.
+  when: not ansible_check_mode
+
+- name: Remove helper files so package updates stop re-patching the UI
+  ansible.builtin.file:
+    path: "{{ item.item }}"
+    state: absent
+  loop: "{{ pve_baseline_nag_files.results | selectattr('stat.exists') | list }}"
+  loop_control:
+    label: "{{ item.item }}"

@@ -1,0 +1,145 @@
+---
+- name: Verify host identity
+  ansible.builtin.import_tasks: identity.yaml
+
+- name: Inventory APT sources for verification
+  ansible.builtin.import_tasks: apt_inventory.yaml
+
+- name: Verify APT repositories
+  ansible.builtin.assert:
+    that:
+      - pve_baseline_apt_unwanted | length == 0
+      - pve_baseline_apt_no_subscription | length == 1
+      - pve_baseline_apt_required_kinds | difference(pve_baseline_apt | selectattr('enabled') | map(attribute='kind')) | length == 0
+      - pve_baseline_apt | selectattr('trusted') | list | length == 0
+    fail_msg: APT must have one no-subscription entry, Debian and security sources, no enterprise/Ceph/test entries and no signature bypass.
+
+- name: Verify APT sources match the fleet standard
+  ansible.builtin.assert:
+    that:
+      - unexpected_uris | length == 0
+      - debian_components | reject('equalto', pve_baseline_apt_debian_components | sort) | list | length == 0
+    fail_msg: >-
+      APT differs from the fleet standard. Unexpected repositories: {{ unexpected_uris }}.
+      Debian components must be {{ pve_baseline_apt_debian_components }}; found {{ debian_components | unique }}.
+      Remove the drift or add a deliberate repository to pve_baseline_apt_allowed_other_uris.
+  vars:
+    enabled: "{{ pve_baseline_apt | selectattr('enabled') | list }}"
+    unexpected_uris: "{{ enabled | selectattr('kind', 'equalto', 'other') | map(attribute='uris') | flatten | reject('in', pve_baseline_apt_allowed_other_uris) | list }}"
+    debian_components: "{{ enabled | selectattr('kind', 'in', ['debian', 'debian-security']) | map(attribute='components') | map('sort') | list }}"
+
+- name: Read host state
+  ansible.builtin.command: "{{ item.value }}"
+  loop: "{{ commands | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  register: pve_baseline_state
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  vars:
+    commands:
+      cluster: /usr/bin/pvecm status
+      storage: /usr/sbin/pvesm status
+      ha_resources: /usr/bin/pvesh get /cluster/ha/resources --output-format json
+      time: /usr/bin/timedatectl show
+      admin_keys: /usr/bin/ssh-keygen -lf /root/.ssh/authorized_keys
+      dns_lookup: /usr/bin/getent ahosts download.proxmox.com
+      firewall: /usr/sbin/pve-firewall status
+      ui_files: /usr/bin/dpkg --verify proxmox-widget-toolkit
+
+- name: Index host state by name
+  ansible.builtin.set_fact:
+    pve_baseline_state_by_name: "{{ dict(pve_baseline_state.results | map(attribute='item.key') | zip(pve_baseline_state.results)) }}"
+
+- name: Read bridge VLAN filtering
+  ansible.builtin.slurp:
+    src: /sys/class/net/{{ pve_baseline_bridge }}/bridge/vlan_filtering
+  register: pve_baseline_vlan_filtering
+
+- name: Gather service state
+  ansible.builtin.service_facts:
+
+- name: Verify cluster membership and HA state
+  ansible.builtin.assert:
+    that:
+      - cluster.rc == 0
+      - cluster.stdout is search('(?m)^Name:\s+' ~ pve_baseline_cluster_name ~ '\s*$')
+      - cluster.stdout is search('(?m)^Quorate:\s+Yes\s*$')
+      - cluster.stdout is search('(?m)^Expected votes:\s+' ~ pve_baseline_cluster_expected_votes ~ '\s*$')
+      - ha.rc == 0
+      - ha.stdout | from_json | length == 0
+    fail_msg: Cluster is not quorate, has unexpected expected votes, or HA resources exist.
+  vars:
+    cluster: "{{ pve_baseline_state_by_name.cluster }}"
+    ha: "{{ pve_baseline_state_by_name.ha_resources }}"
+
+- name: Verify cluster and management services
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.services[item ~ '.service'].state | default('') == 'running'
+      - ansible_facts.services[item ~ '.service'].status | default('') == 'enabled'
+    fail_msg: "{{ item }} must be enabled and running."
+  loop: "{{ pve_baseline_cluster_services }}"
+
+- name: Verify node-local storage
+  ansible.builtin.assert:
+    that:
+      - storage.stdout is search('(?m)^' ~ item ~ '\s+\S+\s+active\s')
+    fail_msg: Storage {{ item }} is not active on this node.
+  loop: "{{ pve_baseline_storage_active }}"
+  vars:
+    storage: "{{ pve_baseline_state_by_name.storage }}"
+
+- name: Verify the management bridge
+  ansible.builtin.assert:
+    that:
+      - ansible_facts[pve_baseline_bridge].type == 'bridge'
+      - ansible_facts[pve_baseline_bridge].interfaces | reject('match', '^(fw|tap|veth)') | list | length > 0
+      - (pve_baseline_vlan_filtering.content | b64decode | trim == '1') == (pve_baseline_bridge_vlan_aware | bool)
+    fail_msg: "{{ pve_baseline_bridge }} is missing its physical port or its VLAN awareness differs from inventory."
+
+- name: Verify DNS and time
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.dns.nameservers | default([]) == pve_baseline_dns_servers
+      - pve_baseline_state_by_name.dns_lookup.rc == 0
+      - clock.stdout is search('(?m)^Timezone=' ~ pve_baseline_timezone ~ '$')
+      - clock.stdout is search('(?m)^NTPSynchronized=yes$')
+      - ansible_facts.services['chrony.service'].state | default('') == 'running'
+    fail_msg: Resolver, name resolution, timezone or time synchronization differs from the baseline.
+  vars:
+    clock: "{{ pve_baseline_state_by_name.time }}"
+
+- name: Verify administrator SSH keys
+  ansible.builtin.assert:
+    that:
+      - item in pve_baseline_state_by_name.admin_keys.stdout
+    fail_msg: Administrator key {{ item }} is missing from root's authorized keys.
+  loop: "{{ pve_baseline_admin_ssh_key_fingerprints }}"
+
+- name: Read the ZFS ARC cap
+  ansible.builtin.slurp:
+    src: "{{ item }}"
+  loop:
+    - /sys/module/zfs/parameters/zfs_arc_max
+    - /etc/modprobe.d/zfs.conf
+  register: pve_baseline_arc
+  when: pve_zfs_arc_max_expected is defined
+
+- name: Verify the runtime and persistent ZFS ARC cap
+  ansible.builtin.assert:
+    that:
+      - pve_baseline_arc.results[0].content | b64decode | trim | int == pve_zfs_arc_max_expected | int
+      - pve_baseline_arc.results[1].content | b64decode is search('(?m)^options zfs zfs_arc_max=' ~ pve_zfs_arc_max_expected ~ '\s*$')
+    fail_msg: ZFS ARC cap differs from the observed value; reconcile it deliberately.
+  when: pve_zfs_arc_max_expected is defined
+
+- name: Report items that need human review
+  ansible.builtin.debug:
+    msg:
+      firewall: "{{ pve_baseline_state_by_name.firewall.stdout_lines }}"
+      subscription_reminder: >-
+        {{ 'packaged UI files are intact'
+           if pve_baseline_state_by_name.ui_files.stdout | trim == ''
+           else 'WARNING: proxmox-widget-toolkit files are modified, so the reminder is still suppressed; see README maintenance' }}

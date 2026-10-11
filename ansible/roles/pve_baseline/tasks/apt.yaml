@@ -1,0 +1,83 @@
+---
+- name: Inventory current APT sources
+  ansible.builtin.import_tasks: apt_inventory.yaml
+
+- name: Refuse to guess about ambiguous APT layouts
+  ansible.builtin.assert:
+    that:
+      - pve_baseline_apt_unwanted | selectattr('format', 'equalto', 'deb822') | selectattr('stanzas_in_file', 'gt', 1) | list | length == 0
+      - pve_baseline_apt_no_subscription | length <= 1
+      - pve_baseline_apt | selectattr('enabled') | map(attribute='suites') | flatten | reject('match', pve_baseline_debian_suite) | list | length == 0
+      - pve_baseline_apt | selectattr('trusted') | list | length == 0
+    fail_msg: >-
+      APT sources need manual review: an entry to disable shares a file with other stanzas,
+      several no-subscription entries are enabled, an enabled suite is not
+      {{ pve_baseline_debian_suite }}, or signature checking is bypassed.
+
+- name: Create backup directories for APT files that will change
+  ansible.builtin.file:
+    path: "{{ pve_baseline_backup_dir }}{{ item | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+  loop: "{{ pve_baseline_apt_unwanted | map(attribute='path') | unique }}"
+
+- name: Keep the first original copy of each APT file that will change
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "{{ pve_baseline_backup_dir }}{{ item }}"
+    remote_src: true
+    force: false
+    owner: root
+    group: root
+    mode: '0600'
+  loop: "{{ pve_baseline_apt_unwanted | map(attribute='path') | unique }}"
+  # The backup directory is only predicted in check mode, so the copy cannot be simulated.
+  when: not ansible_check_mode
+
+- name: Disable unwanted deb822 sources
+  ansible.builtin.lineinfile:
+    path: "{{ item.path }}"
+    regexp: '^Enabled:'
+    line: 'Enabled: false'
+    insertafter: '^Types:'
+  loop: "{{ pve_baseline_apt_unwanted | selectattr('format', 'equalto', 'deb822') | list }}"
+  loop_control:
+    label: "{{ item.path }} ({{ item.kind }})"
+
+- name: Comment out unwanted legacy list entries
+  ansible.builtin.replace:
+    path: "{{ item.path }}"
+    regexp: "^{{ item.line | regex_escape }}$"
+    replace: "# {{ item.line }}"
+  loop: "{{ pve_baseline_apt_unwanted | selectattr('format', 'equalto', 'list') | list }}"
+  loop_control:
+    label: "{{ item.path }} ({{ item.kind }})"
+
+- name: Check for an existing disabled Proxmox source file
+  ansible.builtin.stat:
+    path: /etc/apt/sources.list.d/proxmox.sources
+  register: pve_baseline_proxmox_sources
+  when: pve_baseline_apt_no_subscription | length == 0
+
+- name: Refuse to overwrite a Proxmox source file without review
+  ansible.builtin.assert:
+    that:
+      - not pve_baseline_proxmox_sources.stat.exists
+    fail_msg: /etc/apt/sources.list.d/proxmox.sources exists but no no-subscription entry is enabled; review it manually.
+  when: pve_baseline_apt_no_subscription | length == 0
+
+- name: Add the Proxmox no-subscription repository when none is enabled
+  ansible.builtin.template:
+    src: proxmox.sources.j2
+    dest: /etc/apt/sources.list.d/proxmox.sources
+    owner: root
+    group: root
+    mode: '0644'
+  when: pve_baseline_apt_no_subscription | length == 0
+
+- name: Refresh package lists, treating signature and repository warnings as errors
+  ansible.builtin.command: /usr/bin/apt-get update --error-on=any
+  changed_when: false
+  when: not ansible_check_mode

@@ -1,0 +1,24 @@
+---
+# Notification configuration lives in /etc/pve and is shared by the whole cluster.
+- name: List cluster notification targets
+  ansible.builtin.command: /usr/bin/pvesh get /cluster/notifications/targets --output-format json
+  register: pve_baseline_notification_targets
+  changed_when: false
+  check_mode: false
+
+- name: Require the configured notification target
+  ansible.builtin.assert:
+    that:
+      - pve_baseline_notification_target in (pve_baseline_notification_targets.stdout | from_json | map(attribute='name'))
+    fail_msg: Notification target {{ pve_baseline_notification_target }} does not exist in the cluster configuration.
+
+- name: Send one test notification for the play
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/pvesh
+      - create
+      - /cluster/notifications/targets/{{ pve_baseline_notification_target }}/test
+  changed_when: true
+  when:
+    - pve_baseline_notification_test | bool
+    - inventory_hostname == ansible_play_hosts_all | first
