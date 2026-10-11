@@ -102,6 +102,15 @@
   retries: "{{ pve_update_quorum_retries }}"
   delay: "{{ pve_update_quorum_delay }}"
 
+- name: Wait for time synchronization after boot
+  ansible.builtin.command: /usr/bin/timedatectl show --property=NTPSynchronized --value
+  register: pve_update_time_sync
+  changed_when: false
+  check_mode: false
+  until: pve_update_time_sync.stdout == 'yes'
+  retries: "{{ pve_update_quorum_retries }}"
+  delay: "{{ pve_update_quorum_delay }}"
+
 - name: Record the Proxmox version after updating
   ansible.builtin.command: /usr/bin/pveversion
   register: pve_update_version
