@@ -52,11 +52,6 @@
   ansible.builtin.set_fact:
     pve_baseline_state_by_name: "{{ dict(pve_baseline_state.results | map(attribute='item.key') | zip(pve_baseline_state.results)) }}"
 
-- name: Read bridge VLAN filtering
-  ansible.builtin.slurp:
-    src: /sys/class/net/{{ pve_baseline_bridge }}/bridge/vlan_filtering
-  register: pve_baseline_vlan_filtering
-
 - name: Gather service state
   ansible.builtin.service_facts:
 
@@ -96,8 +91,8 @@
     that:
       - ansible_facts[pve_baseline_bridge].type == 'bridge'
       - ansible_facts[pve_baseline_bridge].interfaces | reject('match', '^(fw|tap|veth)') | list | length > 0
-      - (pve_baseline_vlan_filtering.content | b64decode | trim == '1') == (pve_baseline_bridge_vlan_aware | bool)
-    fail_msg: "{{ pve_baseline_bridge }} is missing its physical port or its VLAN awareness differs from inventory."
+    # VLAN layout is network maintenance; pve_network/verify.yaml checks it.
+    fail_msg: "{{ pve_baseline_bridge }} is missing its physical port."
 
 - name: Verify DNS and time
   ansible.builtin.assert:

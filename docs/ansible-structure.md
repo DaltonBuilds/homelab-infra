@@ -7,7 +7,7 @@ flowchart LR
   subgraph inv["Inventory: who, and with what values"]
     hosts["hosts.yaml<br/>7 hosts and IPs"]
     gv["group_vars/pve.yaml<br/>shared values"]
-    hv["host_vars/pve-07.yaml<br/>GPU IDs, ARC, local-zfs"]
+    hv["host_vars/pve-0N.yaml<br/>bridge VLANs, unused NICs;<br/>pve-07: GPU IDs, ARC, local-zfs"]
   end
 
   subgraph pb["Playbooks: what you run"]
@@ -15,6 +15,7 @@ flowchart LR
     baseline["pve-baseline.yaml<br/>converge, one host at a time"]
     verify["pve-verify.yaml<br/>read-only checks"]
     update["pve-update.yaml<br/>upgrade and reboot, one host at a time"]
+    netcfg["pve-network.yaml<br/>bridge maintenance, one host at a time"]
     gpucfg["pve-gpu-configure.yaml<br/>pve-07 maintenance"]
   end
 
@@ -34,6 +35,13 @@ flowchart LR
 
   subgraph ru["roles/pve_update"]
     upg["upgrade.yaml"]
+  end
+
+  subgraph rn["roles/pve_network"]
+    nconf["configure.yaml"]
+    nver["verify.yaml"]
+    nguest["guests.yaml"]
+    ntpl[/"templates/interfaces.j2"/]
   end
 
   subgraph rg["roles/pve_gpu"]
@@ -56,6 +64,9 @@ flowchart LR
   update --> upg
   update -->|"after each host"| bver
   update -->|"pve-07 only"| gver
+  verify --> nver
+  netcfg --> nconf
+  netcfg -->|"after each host"| nver
   gpucfg --> gconf
 
   conv --> pre --> ident
@@ -67,6 +78,12 @@ flowchart LR
   bver --> ident
   bver --> aptinv
   upg -->|"reuses"| pre
+
+  nconf -->|"reuses"| pre
+  nconf --> ntpl
+  nconf --> nver
+  nconf --> nguest
+  nver --> ntpl
 
   gconf --> ginsp --> gpy
   gconf --> gpre
@@ -83,6 +100,6 @@ Solid arrows mean "runs". The dashed arrow from the inventory means every playbo
 - **Inventory** says which hosts exist and holds their values. `group_vars/pve.yaml` applies to every host; `host_vars/<host>.yaml` overrides or adds values for one host. Role `defaults/main.yaml` files hold the lowest-priority values and are not drawn.
 - **Playbooks** are what you run. Each one picks a role's entry task file with `tasks_from`.
 - **Roles** group the work. Entry task files such as `converge.yaml` pull in smaller task files. Those use the role's `files/` (scripts piped to the host's Python, never installed) and `templates/` (files rendered with inventory values).
-- **Shared checks.** `pve_baseline/verify.yaml` is the acceptance check for every host. `pve-verify.yaml` runs it on demand, and `pve-baseline.yaml` and `pve-update.yaml` run it after each host before moving on. `pve_update` reuses the baseline preflight, so updates require the same identity and full-quorum checks as configuration changes.
+- **Shared checks.** `pve_baseline/verify.yaml` is the acceptance check for every host. `pve-verify.yaml` runs it on demand, and `pve-baseline.yaml` and `pve-update.yaml` run it after each host before moving on. `pve_update` and `pve_network` reuse the baseline preflight, so updates and network changes require the same identity and full-quorum checks as configuration changes. `pve_network/verify.yaml` is the network acceptance check; `pve-verify.yaml` and `pve-network.yaml` run it, and it compares the live file with the template so UI edits show up as drift.
 
-Only `pve-baseline.yaml`, `pve-update.yaml` and `pve-gpu-configure.yaml` change hosts. The last two also require a confirmation variable for a real run.
+Only `pve-baseline.yaml`, `pve-update.yaml`, `pve-network.yaml` and `pve-gpu-configure.yaml` change hosts. The last three also require a confirmation variable for a real run.

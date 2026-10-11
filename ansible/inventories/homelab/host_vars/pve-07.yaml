@@ -23,3 +23,7 @@ pve_zfs_arc_max_expected: 6647971840
 pve_baseline_storage_active:
   - local
   - local-zfs
+
+pve_network_bridge_vids: [50]
+# Unused onboard ports; the USB adapter has no stanza.
+pve_network_manual_nics: [nic1, nic2, nic3]

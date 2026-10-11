@@ -1,0 +1,25 @@
+# Managed by homelab-infra pve-network.yaml. Change inventory, not this file.
+auto lo
+iface lo inet loopback
+
+iface {{ pve_network_bridge_port }} inet manual
+
+auto {{ pve_baseline_bridge }}
+iface {{ pve_baseline_bridge }} inet static
+	address {{ ansible_host }}/{{ pve_network_address_prefix }}
+	gateway {{ pve_baseline_gateway }}
+	bridge-ports {{ pve_network_bridge_port }}
+	bridge-stp off
+	bridge-fd 0
+{% if pve_network_bridge_vlan_aware | bool %}
+	bridge-vlan-aware yes
+{% if pve_network_bridge_vids | length > 0 %}
+	bridge-vids {{ pve_network_bridge_vids | join(' ') }}
+{% endif %}
+{% endif %}
+{% for nic in pve_network_manual_nics %}
+
+iface {{ nic }} inet manual
+{% endfor %}
+
+source /etc/network/interfaces.d/*

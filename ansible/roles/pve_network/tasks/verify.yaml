@@ -1,0 +1,48 @@
+---
+- name: Read the network file
+  ansible.builtin.slurp:
+    src: /etc/network/interfaces
+  register: pve_network_file
+
+- name: Read bridge VLAN filtering
+  ansible.builtin.slurp:
+    src: /sys/class/net/{{ pve_baseline_bridge }}/bridge/vlan_filtering
+  register: pve_network_vlan_filtering
+
+- name: Read the physical port's VLANs
+  ansible.builtin.command: /usr/sbin/bridge -j vlan show dev {{ pve_network_bridge_port }}
+  register: pve_network_port_vlans
+  changed_when: false
+  check_mode: false
+
+- name: Check the running interfaces against the file
+  ansible.builtin.command: /usr/sbin/ifquery --all --check
+  register: pve_network_ifquery
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Verify the bridge matches inventory
+  ansible.builtin.assert:
+    that:
+      - file_matches
+      - pve_network_ifquery.rc == 0
+      - (pve_network_vlan_filtering.content | b64decode | trim == '1') == (pve_network_bridge_vlan_aware | bool)
+      - not (pve_network_bridge_vlan_aware | bool) or untagged == [1]
+      - not (pve_network_bridge_vlan_aware | bool) or tagged == pve_network_bridge_vids | map('int') | sort
+    fail_msg: >-
+      {{ pve_baseline_bridge }} differs from inventory. File matches: {{ file_matches }}
+      (pve-network.yaml --check --diff shows the drift). Running state matches file: {{ pve_network_ifquery.rc == 0 }}.
+      VLAN filtering: {{ pve_network_vlan_filtering.content | b64decode | trim }}.
+      {{ pve_network_bridge_port }} untagged {{ untagged }}, tagged {{ tagged }}; expected tagged {{ pve_network_bridge_vids }}.
+  vars:
+    file_matches: "{{ pve_network_file.content | b64decode | trim == lookup('ansible.builtin.template', 'interfaces.j2') | trim }}"
+    entries: "{{ (pve_network_port_vlans.stdout | from_json | first | default({})).vlans | default([]) }}"
+    untagged: "{{ entries | selectattr('flags', 'defined') | selectattr('flags', 'contains', 'PVID') | map(attribute='vlan') | list }}"
+    # bridge prints contiguous VIDs as one entry with vlanEnd.
+    tagged: >-
+      {%- set ns = namespace(vids=[]) -%}
+      {%- for entry in entries if 'PVID' not in entry.flags | default([]) -%}
+      {%- set ns.vids = ns.vids + range(entry.vlan, entry.vlanEnd | default(entry.vlan) + 1) | list -%}
+      {%- endfor -%}
+      {{ ns.vids | sort }}

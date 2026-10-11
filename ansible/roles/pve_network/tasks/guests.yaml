@@ -1,0 +1,29 @@
+---
+# Ports that existed before VLAN filtering was turned on keep only VID 1. Proxmox gives a guest
+# its VLANs when it plugs the port in, so the guest must be stopped and started to get them.
+- name: List ports on the bridge
+  ansible.builtin.find:
+    paths: /sys/class/net/{{ pve_baseline_bridge }}/brif
+    file_type: any
+  register: pve_network_bridge_ports
+
+- name: Read guest port VLANs
+  ansible.builtin.command: /usr/sbin/bridge -j vlan show
+  register: pve_network_all_vlans
+  changed_when: false
+  check_mode: false
+
+- name: Find guests whose bridge port carries only untagged traffic
+  ansible.builtin.set_fact:
+    pve_network_guests_to_restart: >-
+      {{ pve_network_all_vlans.stdout | from_json
+         | selectattr('ifname', 'in', ports)
+         | selectattr('ifname', 'match', '^(tap|fwpr|veth)[0-9]+')
+         | selectattr('vlans', 'defined')
+         | selectattr('vlans', 'equalto', [{'vlan': 1, 'flags': ['PVID', 'Egress Untagged']}])
+         | map(attribute='ifname')
+         | map('regex_replace', '^(?:tap|fwpr|veth)([0-9]+).*$', '\1')
+         | unique | list }}
+  vars:
+    ports: "{{ pve_network_bridge_ports.files | map(attribute='path') | map('basename') | list }}"
+  when: pve_network_bridge_vlan_aware | bool

@@ -1,0 +1,3 @@
+---
+# HOMELAB-40: no tagged VLANs yet.
+pve_network_manual_nics: [nic1]

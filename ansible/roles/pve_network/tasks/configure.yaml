@@ -1,0 +1,146 @@
+---
+- name: Validate identity and require full cluster health
+  ansible.builtin.include_role:
+    name: pve_baseline
+    tasks_from: preflight
+
+- name: Require explicit maintenance acknowledgement
+  ansible.builtin.assert:
+    that:
+      - ansible_check_mode or (pve_network_maintenance_confirmed | bool)
+    fail_msg: Review the check-mode diff, confirm local console access and quorum, then set pve_network_maintenance_confirmed=true.
+
+- name: Require a usable network inventory
+  ansible.builtin.assert:
+    that:
+      - pve_network_bridge_port in ansible_facts.interfaces
+      - ansible_facts[pve_network_bridge_port].type | default('') == 'ether'
+      - pve_network_bridge_vids | map('string') | reject('match', '^[0-9]+$') | list | length == 0
+      - pve_network_bridge_vids | map('int') | select('lt', 2) | list | length == 0
+      - pve_network_bridge_vids | map('int') | select('gt', 4094) | list | length == 0
+      - pve_network_bridge_vids | length == 0 or (pve_network_bridge_vlan_aware | bool)
+    fail_msg: The bridge port must be a physical NIC on this host, and bridge VIDs must be 2-4094 on a VLAN-aware bridge.
+
+- name: Read the rollback timer state
+  ansible.builtin.command: /usr/bin/systemctl is-active {{ pve_network_rollback_unit }}.timer
+  register: pve_network_rollback_state
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Refuse to start while an earlier rollback is pending
+  ansible.builtin.assert:
+    that:
+      - pve_network_rollback_state.stdout | trim != 'active'
+    fail_msg: "{{ pve_network_rollback_unit }}.timer is still armed from an earlier run. Let it fire or check the host from its console first."
+
+- name: Compare the network file with inventory
+  ansible.builtin.template:
+    src: interfaces.j2
+    dest: /etc/network/interfaces
+    owner: root
+    group: root
+    mode: '0644'
+  check_mode: true
+  register: pve_network_planned
+
+- name: Apply the file with an armed rollback
+  when:
+    - pve_network_planned.changed
+    - not ansible_check_mode
+  block:
+    - name: Create the backup directory
+      ansible.builtin.file:
+        path: "{{ pve_network_backup_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+
+    - name: Back up the current network file
+      ansible.builtin.copy:
+        src: /etc/network/interfaces
+        dest: "{{ pve_network_backup_dir }}/interfaces.{{ ansible_date_time.iso8601_basic_short }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: '0644'
+      register: pve_network_backup
+
+    - name: Arm the rollback timer
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/systemd-run
+          - --unit={{ pve_network_rollback_unit }}
+          - --on-active={{ pve_network_rollback_seconds }}
+          - /bin/sh
+          - -c
+          - cp -p {{ pve_network_backup.dest }} /etc/network/interfaces && /usr/sbin/ifreload -a
+      changed_when: true
+
+    - name: Write the network file
+      ansible.builtin.template:
+        src: interfaces.j2
+        dest: /etc/network/interfaces
+        owner: root
+        group: root
+        mode: '0644'
+
+    # Async so the reload finishes on the host even if the SSH session drops during it.
+    - name: Reload networking
+      ansible.builtin.command: /usr/sbin/ifreload -a
+      async: 120
+      poll: 5
+      changed_when: true
+
+    - name: Wait for management access
+      ansible.builtin.wait_for_connection:
+        timeout: 60
+
+    - name: Wait for a fully healthy cluster
+      ansible.builtin.command: /usr/bin/pvecm status
+      register: pve_network_quorum
+      changed_when: false
+      until:
+        - pve_network_quorum.stdout is search('(?m)^Quorate:\s+Yes\s*$')
+        - pve_network_quorum.stdout is search('(?m)^Total votes:\s+' ~ pve_baseline_cluster_expected_votes ~ '\s*$')
+      retries: "{{ pve_network_quorum_retries }}"
+      delay: "{{ pve_network_quorum_delay }}"
+
+    - name: Verify the new bridge
+      ansible.builtin.include_tasks: verify.yaml
+
+    - name: Disarm the rollback timer
+      ansible.builtin.command: /usr/bin/systemctl stop {{ pve_network_rollback_unit }}.timer
+      changed_when: true
+
+  # Runs only while the host is still reachable. If it is not, the timer restores the old file.
+  rescue:
+    - name: Restore the previous network file now
+      ansible.builtin.shell: |
+        cp -p {{ pve_network_backup.dest }} /etc/network/interfaces
+        /usr/sbin/ifreload -a
+        /usr/bin/systemctl stop {{ pve_network_rollback_unit }}.timer
+      when: pve_network_backup.dest is defined
+      changed_when: true
+
+    - name: Stop after rolling back
+      ansible.builtin.fail:
+        msg: >-
+          Network change failed on {{ inventory_hostname }} and was rolled back. Check the host from its console
+          and confirm quorum before trying again. If the host was unreachable, {{ pve_network_rollback_unit }}.timer
+          restores {{ pve_network_backup.dest | default('the backup') }} within {{ pve_network_rollback_seconds }} seconds of arming.
+
+- name: Find guests that need a stop and start
+  ansible.builtin.import_tasks: guests.yaml
+
+- name: Report the network change
+  ansible.builtin.debug:
+    msg:
+      file_changed: "{{ pve_network_planned.changed }}"
+      backup: "{{ pve_network_backup.dest | default('none') }}"
+      guests_without_vlans: "{{ pve_network_guests_to_restart | default([]) }}"
+      next_step: >-
+        {{ 'Stop and start these guests from Proxmox (qm shutdown/qm start or pct) before relying on tagged VLANs. '
+           ~ 'A reboot from inside the guest keeps the old port.'
+           if pve_network_guests_to_restart | default([]) | length > 0 else 'No guest action needed.' }}

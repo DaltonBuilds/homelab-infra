@@ -1,0 +1,3 @@
+---
+# HOMELAB-40: VyOS bgp-01 trunks VLANs 50 and 60.
+pve_network_bridge_vids: [50, 60]

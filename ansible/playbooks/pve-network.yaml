@@ -1,0 +1,18 @@
+---
+- name: Apply the declared bridge layout one host at a time during explicit maintenance
+  hosts: pve
+  gather_facts: true
+  serial: 1
+  any_errors_fatal: true
+  tasks:
+    - name: Apply this host's network file
+      ansible.builtin.import_role:
+        name: pve_network
+        tasks_from: configure
+
+    # Check mode predicts changes it did not make, so post-change assertions would fail.
+    - name: Verify the bridge before moving to the next host
+      ansible.builtin.include_role:
+        name: pve_network
+        tasks_from: verify
+      when: not ansible_check_mode

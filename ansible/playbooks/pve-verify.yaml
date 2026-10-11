@@ -8,6 +8,11 @@
         name: pve_baseline
         tasks_from: verify
 
+    - name: Verify the bridge matches inventory
+      ansible.builtin.include_role:
+        name: pve_network
+        tasks_from: verify
+
     - name: Verify GPU passthrough on explicitly enabled hosts
       ansible.builtin.include_role:
         name: pve_gpu

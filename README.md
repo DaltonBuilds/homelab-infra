@@ -16,10 +16,11 @@ homelab-infra/
 │   ├── ansible.cfg
 │   ├── requirements.yml             # pinned collections, when added
 │   ├── inventories/homelab/         # hosts, group_vars, host_vars
-│   ├── playbooks/                   # pve-inspect, pve-baseline, pve-verify, pve-update, pve-gpu-configure
+│   ├── playbooks/                   # pve-inspect, pve-baseline, pve-verify, pve-update, pve-network, pve-gpu-configure
 │   └── roles/
 │       ├── pve_baseline/            # fleet APT, time, notification checks and verification
 │       ├── pve_update/              # gated one-host-at-a-time upgrade and reboot
+│       ├── pve_network/             # declared /etc/network/interfaces with automatic rollback
 │       └── pve_gpu/                 # pve-07 GPU inspect, preflight, configure, verify
 ```
 
@@ -47,7 +48,7 @@ A baseline run:
 - sets the timezone and checks that the notification target exists;
 - copies each file to `/root/homelab-baseline-backup/` on the host before its first change.
 
-It never upgrades or reboots a host, changes networking, storage or cluster membership, rewrites root's authorized keys (cluster-shared under `/etc/pve/priv`), or changes SSH daemon or firewall settings. Verification checks APT, identity, quorum, absence of HA resources, cluster services, node-local storage, the management bridge and its VLAN-awareness, resolver and name resolution, time synchronization, the administrator key fingerprint and pve-07's runtime and persistent ARC cap. It also fails on APT drift: an enabled repository outside the known kinds (allow deliberate ones in `pve_baseline_apt_allowed_other_uris`), or Debian components other than `main contrib non-free-firmware`. It reports firewall status and whether the packaged UI files are still modified.
+It never upgrades or reboots a host, changes networking, storage or cluster membership, rewrites root's authorized keys (cluster-shared under `/etc/pve/priv`), or changes SSH daemon or firewall settings. Verification checks APT, identity, quorum, absence of HA resources, cluster services, node-local storage, the management bridge and its physical port, resolver and name resolution, time synchronization, the administrator key fingerprint and pve-07's runtime and persistent ARC cap. It also fails on APT drift: an enabled repository outside the known kinds (allow deliberate ones in `pve_baseline_apt_allowed_other_uris`), or Debian components other than `main contrib non-free-firmware`. It reports firewall status and whether the packaged UI files are still modified. `pve-verify.yaml` also runs the network checks described under [Bridge network](#bridge-network).
 
 Check mode limitations: commands that change state (`apt-get update`, `timedatectl set-timezone`, the test notification) are skipped, backup copies are not simulated, and post-change verification is skipped because predicted changes have not happened. Read-only inspection still runs.
 
@@ -63,7 +64,8 @@ These are deliberately outside a baseline run. Do them one host at a time with l
 
 - **Restore the subscription reminder.** Removing the helper hook stops new patching, but `proxmoxlib.js` stays modified until `proxmox-widget-toolkit` is reinstalled or upgraded. Either upgrade during update maintenance, or reinstall the installed version: `apt-get install --reinstall proxmox-widget-toolkit=$(dpkg-query -W -f='${Version}' proxmox-widget-toolkit)`. Then confirm `dpkg --verify proxmox-widget-toolkit` prints nothing.
 - **Updates.** Use `pve-update.yaml`, below. Match a rebuilt node's update level to the surviving members before joining it.
-- **Network, firewall or bridge changes.** Back up `/etc/network/interfaces`, keep console access, apply with `ifreload -a`, and roll back from the console if management access is lost. Update `pve_baseline_bridge_vlan_aware` only after deliberately changing the bridge.
+- **Bridge changes.** Change inventory and use `pve-network.yaml`, below. Do not edit networking in the Proxmox UI; `pve-verify.yaml` reports it as drift.
+- **Firewall changes.** Keep console access and confirm quorum and `pve-verify.yaml` afterwards.
 - **Rollback of a baseline run.** Copy files back from `/root/homelab-baseline-backup/` to their original paths and run `apt-get update`.
 
 ### Updates
@@ -84,6 +86,29 @@ mise exec -- ansible-playbook ansible/playbooks/pve-update.yaml -e pve_update_ma
 It ends by reporting each host's `pveversion` and whether they all match. Run it across all hosts in one session so they land on the same versions; a `--limit` run updates only those hosts.
 
 Check mode lists the hosts with pending upgrades but decides about rebooting from the kernels installed now; a real run decides after upgrading, so a newly installed kernel also triggers a reboot. A pinned kernel (`proxmox-boot-tool kernel pin`) makes the newest-kernel comparison reboot every run; unpin it or limit those hosts out.
+
+## Bridge network
+
+Inventory declares each host's `/etc/network/interfaces`: `pve_network_*` in `group_vars/pve.yaml` for the fleet, and per host in `host_vars/` the tagged VLANs the switch trunks to it (`pve_network_bridge_vids`) and unused NIC stanzas to keep (`pve_network_manual_nics`). The bridge address is the host's `ansible_host`. Management VLAN 40 stays native/untagged on `vmbr0` ([HOMELAB-40](https://daltonbuilds.youtrack.cloud/issue/HOMELAB-40)).
+
+```sh
+mise exec -- ansible-playbook ansible/playbooks/pve-network.yaml --check --diff --limit pve-03
+mise exec -- ansible-playbook ansible/playbooks/pve-network.yaml --diff --limit pve-03 -e pve_network_maintenance_confirmed=true
+```
+
+Start with a host that has no guests, then the rest, leaving hosts with running guests for last. For each host it:
+
+1. runs the baseline preflight (identity, quorate cluster with all votes), requires the maintenance acknowledgement and refuses to start if an earlier rollback timer is still armed;
+2. does nothing else if the file already matches inventory;
+3. copies the current file to `/root/homelab-network-backup/`, arms a `homelab-network-rollback` systemd timer (5 minutes), writes the new file and runs `ifreload -a`;
+4. waits for SSH and full quorum, checks `ifquery --all --check`, the file, VLAN filtering and the VLANs on the physical port, then disarms the timer;
+5. reports guests whose bridge port still carries only untagged traffic.
+
+If a check fails while the host is reachable, the play restores the backup immediately and stops. If the host becomes unreachable, the timer restores the backup and reloads networking on its own. Either way, check the host from its console and confirm quorum before trying again. No host reboot is involved.
+
+Guests that were running when VLAN filtering was turned on keep only VID 1 on their port, because Proxmox assigns VLANs when it plugs a port in. Stop and start each reported guest from Proxmox (`qm shutdown <vmid> && qm start <vmid>`); a reboot from inside the guest keeps the old port. Proxmox gives untagged guest NICs VIDs 2-4094 unless `trunks=` limits them; `pve_network_bridge_vids` only limits what the physical port carries.
+
+To add a VLAN later, for example 70, add it to the host's `pve_network_bridge_vids` after the switch trunks it, then run the playbook for that host.
 
 ## pve-07 GPU adoption
 

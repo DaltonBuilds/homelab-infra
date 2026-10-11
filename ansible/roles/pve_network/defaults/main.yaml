@@ -1,0 +1,16 @@
+---
+# Must be set on the command line for a real run.
+pve_network_maintenance_confirmed: false
+
+# Inventory declares the layout; these are only the empty fallbacks.
+pve_network_bridge_vlan_aware: false
+pve_network_bridge_vids: []
+pve_network_manual_nics: []
+
+# If the play loses the host or a post-change check fails, this timer restores the old file.
+pve_network_rollback_seconds: 300
+pve_network_rollback_unit: homelab-network-rollback
+pve_network_backup_dir: /root/homelab-network-backup
+
+pve_network_quorum_retries: 30
+pve_network_quorum_delay: 10
