@@ -150,12 +150,14 @@ Managed Tailscale (free Personal plan) gives the administrator TCP 8006 and 22 o
 
 ### Policy
 
-`tailscale/policy.hujson` is the entire tailnet policy. It grants `autogroup:owner` (on the Personal plan, only the account that owns the tailnet) 8006 and 22 on the seven hosts, auto-approves exactly those seven `/32` routes from `tag:pve-mgmt-router`, and has no default allow-all rule, so traffic between other tailnet devices is denied. Its `tests` block checks allowed and denied destinations on every save; a failing test rejects the policy.
+`tailscale/policy.hujson` is the entire tailnet policy. It grants the administrator login 8006 and 22 on the seven hosts, auto-approves exactly those seven `/32` routes from `tag:pve-mgmt-router`, and has no default allow-all rule, so traffic between other tailnet devices is denied. Its `tests` block checks allowed and denied destinations on every save; a failing test rejects the policy.
 
-`.github/workflows/tailscale-policy.yaml` runs `test` on pull requests and `apply` on merge to `main`. It authenticates with GitHub's OIDC token through a Tailscale federated identity, so no Tailscale secret is stored in GitHub. One-time setup:
+The repository is public, so the policy says `ADMIN_LOGIN` where the administrator login belongs. Policy tests need a real login; `autogroup:owner` is rejected in tests.
 
-1. In the Tailscale admin console, create a federated identity for GitHub Actions limited to this repository, with only the `policy_file` scope. Set repository variables `TS_FEDERATED_CLIENT_ID` and `TS_FEDERATED_AUDIENCE`.
-2. Paste the policy into the console once (its tests run there), then let the workflow own it. The action refuses to overwrite console edits made since its last apply; resolve those in Git.
+`.github/workflows/tailscale-policy.yaml` runs `test` on pull requests and `apply` on merge to `main`. It fills in the login from the `TS_ADMIN_LOGIN` repository secret, which GitHub masks in logs, and authenticates with GitHub's OIDC token through a Tailscale federated identity, so no Tailscale credential is stored in GitHub. One-time setup:
+
+1. In the Tailscale admin console, create a federated identity for GitHub Actions with issuer `https://token.actions.githubusercontent.com`, subject `repo:DaltonBuilds@64839972/homelab-infra@1403333457:*` (GitHub subjects include the owner and repository IDs) and only the `policy_file` scope. Set repository variables `TS_FEDERATED_CLIENT_ID` and `TS_FEDERATED_AUDIENCE`, and repository secret `TS_ADMIN_LOGIN`.
+2. Paste the policy into the console once with the login filled in (`sed 's|ADMIN_LOGIN|<login>|g' tailscale/policy.hujson | pbcopy`); its tests run there, then let the workflow own it. The action refuses to overwrite console edits made since its last apply; resolve those in Git.
 
 ### Router
 

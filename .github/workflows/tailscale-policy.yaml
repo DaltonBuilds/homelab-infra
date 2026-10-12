@@ -2,8 +2,11 @@
 # Tests tailscale/policy.hujson on pull requests and applies it on merge to main.
 # Authenticates with GitHub's OIDC token through a Tailscale federated identity, so no
 # long-lived Tailscale secret is stored in GitHub. Repository variables (not secrets):
-# TS_FEDERATED_CLIENT_ID and TS_FEDERATED_AUDIENCE. Scope the federated identity to
-# policy_file only and to this repository's main branch and pull requests.
+# TS_FEDERATED_CLIENT_ID and TS_FEDERATED_AUDIENCE. Repository secret TS_ADMIN_LOGIN
+# replaces the ADMIN_LOGIN placeholder so the login stays out of Git and public logs.
+# Scope the federated identity to policy_file only.
+# GitHub subjects carry immutable IDs, so the identity's subject is
+# repo:DaltonBuilds@64839972/homelab-infra@1403333457:*
 # Logs of this public repository are public, so the tailnet is "-" (the credential's
 # own tailnet) rather than its name, which can be the owner's login.
 name: Tailscale policy
@@ -32,11 +35,17 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Fill in the administrator login
+        env:
+          TS_ADMIN_LOGIN: ${{ secrets.TS_ADMIN_LOGIN }}
+        run: |
+          test -n "$TS_ADMIN_LOGIN" || { echo "::error::TS_ADMIN_LOGIN secret is not set"; exit 1; }
+          sed "s|ADMIN_LOGIN|${TS_ADMIN_LOGIN}|g" tailscale/policy.hujson > "$RUNNER_TEMP/policy.hujson"
       - name: ${{ github.event_name == 'push' && 'Apply' || 'Test' }} policy
         uses: tailscale/gitops-acl-action@5a4a17f5708e9bf96f4ee915a95e9f83c2eebe1a # v1.5.2
         with:
           oauth-client-id: ${{ vars.TS_FEDERATED_CLIENT_ID }}
           audience: ${{ vars.TS_FEDERATED_AUDIENCE }}
           tailnet: '-'
-          policy-file: tailscale/policy.hujson
+          policy-file: ${{ runner.temp }}/policy.hujson
           action: ${{ github.event_name == 'push' && 'apply' || 'test' }}
