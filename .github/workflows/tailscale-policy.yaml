@@ -3,8 +3,8 @@
 # Authenticates with GitHub's OIDC token through a Tailscale federated identity, so no
 # long-lived Tailscale secret is stored in GitHub. Repository variables (not secrets):
 # TS_FEDERATED_CLIENT_ID and TS_FEDERATED_AUDIENCE. Repository secret TS_ADMIN_LOGIN
-# replaces the ADMIN_LOGIN placeholder so the login stays out of Git and public logs. Scope the federated identity to
-# policy_file only and to this repository's main branch and pull requests.
+# replaces the ADMIN_LOGIN placeholder so the login stays out of Git and public logs.
+# Scope the federated identity to policy_file only.
 # GitHub subjects carry immutable IDs, so the identity's subject is
 # repo:DaltonBuilds@64839972/homelab-infra@1403333457:*
 # Logs of this public repository are public, so the tailnet is "-" (the credential's
