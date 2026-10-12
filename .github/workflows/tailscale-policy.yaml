@@ -33,6 +33,11 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # TEMPORARY: show the OIDC claims Tailscale compares; the token itself is never printed.
+      - name: Show OIDC claims
+        run: |
+          tok=$(curl -sS -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${{ vars.TS_FEDERATED_AUDIENCE }}" | jq -r .value)
+          echo "$tok" | cut -d. -f2 | tr '_-' '/+' | base64 -d 2>/dev/null | jq '{iss, sub, aud}' || true
       - name: Fill in the administrator login
         env:
           TS_ADMIN_LOGIN: ${{ secrets.TS_ADMIN_LOGIN }}
