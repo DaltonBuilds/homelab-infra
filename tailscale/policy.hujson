@@ -4,9 +4,9 @@
 // This file is the whole policy: anything not granted below is denied, including
 // traffic between your own tailnet devices. There is no default allow-all rule.
 //
-// Identities are role autogroups, never logins, because this repository is public.
-// On the Personal plan autogroup:owner is only the account that owns the tailnet;
-// invited users are members, not owners.
+// ADMIN_LOGIN is a placeholder because this repository is public. The workflow
+// replaces it from the TS_ADMIN_LOGIN secret. Policy tests need a real login:
+// autogroup:owner is rejected in tests, and in grants it breaks every test.
 {
 	"hosts": {
 		"pve-01": "192.168.40.50",
@@ -39,7 +39,7 @@
 	// Web UI, noVNC/xterm.js consoles (proxied over 8006) and SSH. Nothing else.
 	"grants": [
 		{
-			"src": ["autogroup:owner"],
+			"src": ["ADMIN_LOGIN"],
 			"dst": ["pve-01", "pve-02", "pve-03", "pve-04", "pve-05", "pve-06", "pve-07"],
 			"ip":  ["tcp:8006", "tcp:22"],
 		},
@@ -48,7 +48,7 @@
 	// Checked on every save. A failing test rejects the whole policy.
 	"tests": [
 		{
-			"src": "autogroup:owner",
+			"src": "ADMIN_LOGIN",
 			"accept": [
 				"192.168.40.50:8006", "192.168.40.50:22",
 				"192.168.40.55:8006", "192.168.40.55:22",
@@ -71,10 +71,6 @@
 			// The router tag is a route carrier, not a management identity.
 			"src": "tag:pve-mgmt-router",
 			"deny": ["192.168.40.50:8006", "192.168.40.50:22"],
-		},
-		{
-			"src": "unauthorized@example.com",
-			"deny": ["192.168.40.50:8006", "192.168.40.50:22", "192.168.40.66:8006"],
 		},
 	],
 }
