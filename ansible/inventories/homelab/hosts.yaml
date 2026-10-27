@@ -26,3 +26,10 @@ all:
           ansible_host: 192.168.40.13
       vars:
         ansible_user: root
+    # HOMELAB-41: Tailscale exit node for public Wi-Fi, an unprivileged LXC on pve-03.
+    ts_exit:
+      hosts:
+        ts-exit-01:
+          ansible_host: 192.168.40.14
+      vars:
+        ansible_user: root

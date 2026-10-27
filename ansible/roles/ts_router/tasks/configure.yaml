@@ -36,7 +36,7 @@
     update_cache: "{{ ts_router_apt_source is changed }}"
 
 # Forwarding is per network namespace, so this changes the container only, not pve-03.
-- name: Enable IPv4 forwarding for subnet routing
+- name: Enable forwarding for subnet or exit routing
   ansible.builtin.copy:
     dest: /etc/sysctl.d/99-ts-router.conf
     owner: root
@@ -45,6 +45,10 @@
     content: |
       # Managed by homelab-infra ts_router. Tailscale subnet routing needs forwarding.
       net.ipv4.ip_forward = 1
+      {% if ts_router_exit_node | bool %}
+      # Exit nodes carry ::/0 too.
+      net.ipv6.conf.all.forwarding = 1
+      {% endif %}
   notify: Apply forwarding sysctl
 
 - name: Apply forwarding before enrollment
@@ -88,7 +92,7 @@
         mode: '0600'
       no_log: true
 
-    - name: Bring Tailscale up with the declared tag and routes
+    - name: Bring Tailscale up with the declared tag, routes and exit node setting
       ansible.builtin.command:
         argv:
           - /usr/bin/tailscale
@@ -97,6 +101,7 @@
           - --hostname={{ ts_router_hostname }}
           - --advertise-tags={{ ts_router_tag }}
           - --advertise-routes={{ ts_router_routes | join(',') }}
+          - --advertise-exit-node={{ ts_router_exit_node | bool | lower }}
           # Replies return through the router without UniFi routes; PVE logs show the router's address.
           - --snat-subnet-routes=true
           # Keep name resolution independent of the tailnet, and do not route back into it.
@@ -129,12 +134,13 @@
     fail_msg: The router is enrolled without {{ ts_router_tag }}. Re-enroll it; see the README revocation procedure.
   when: ts_router_enrolled | bool
 
-- name: Advertise exactly the declared routes
+- name: Advertise exactly the declared routes and exit node setting
   ansible.builtin.command:
     argv:
       - /usr/bin/tailscale
       - set
       - --advertise-routes={{ ts_router_routes | join(',') }}
+      - --advertise-exit-node={{ ts_router_exit_node | bool | lower }}
       - --snat-subnet-routes=true
       - --accept-dns=false
       - --accept-routes=false
@@ -142,7 +148,7 @@
   when:
     - ts_router_enrolled | bool
     - >-
-      (ts_router_prefs.AdvertiseRoutes | default([], true) | sort) != ts_router_routes
+      (ts_router_prefs.AdvertiseRoutes | default([], true) | sort) != ts_router_advertised_routes
       or ts_router_prefs.NoSNAT | default(false)
       or ts_router_prefs.CorpDNS | default(false)
       or ts_router_prefs.RouteAll | default(false)
