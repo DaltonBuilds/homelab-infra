@@ -181,6 +181,22 @@ The second play installs Tailscale from its stable repository (`present`, not `l
 
 **Failure and fallback.** If pve-03 or the container is down, remote access is down; vault-02 also lives on pve-03 but OpenBao keeps quorum. Manage from the LAN (VLAN 10 workstation to each host's UI/SSH) or the local console, then start the container with `pct start 110` on pve-03 or recreate it from this playbook. A VPN cannot start a powered-off host or repair a broken host network.
 
+### Exit node
+
+`ts-exit-01` (guest 111 on pve-03, `192.168.40.14`) sends a remote client's internet traffic out through home, so public Wi-Fi sees only an encrypted tunnel (HOMELAB-41). It uses the `ts_router` role with no subnet routes and `ts_router_exit_node: true`.
+
+```sh
+mise exec -- ansible-playbook ansible/playbooks/ts-exit-node.yaml --check --diff
+read -rs "TS_AUTHKEY?Auth key: " && export TS_AUTHKEY && mise exec -- ansible-playbook ansible/playbooks/ts-exit-node.yaml --diff; unset TS_AUTHKEY   # first run only
+mise exec -- ansible-playbook ansible/playbooks/ts-exit-node-verify.yaml
+```
+
+The policy does not route to the container, so Ansible reaches it through `ProxyJump` via pve-03, from the LAN or remotely. Generate the enrollment key as for the router, tagged `tag:exit-node`. The policy auto-approves exit routes for that tag only and grants the administrator `autogroup:internet`, which excludes private ranges: using the exit node opens nothing on the LAN. The container enables IPv4 and IPv6 forwarding in its own namespace. Verification requires the exit routes to be approved (`Self.AllowedIPs`) and forwarding on.
+
+**Client.** In the macOS menu, choose **Exit Node → ts-exit-01** and keep **Use Tailscale subnets** on for PVE access. Check with `curl -s ifconfig.me` (the home address) and a DNS leak test. If a captive portal reappears, choose **Exit Node → None**, accept it, then reselect, or enable **Allow Local Network Access**.
+
+**Trade-offs and failure.** Traffic is hidden from the local network, not from the home ISP, and sites see the home address. Throughput is capped by home upload. If home internet, pve-03 or the container is down, the client has no internet while the exit node is selected; choose **None** to fall back to the local network. Keep node-key expiry on for clients, and revoke a lost client in the admin console.
+
 ## Design references
 
 - [Proxmox baseline](https://github.com/DaltonBuilds/homelab-odyssey/blob/main/docs/build/proxmox-baseline.md)
