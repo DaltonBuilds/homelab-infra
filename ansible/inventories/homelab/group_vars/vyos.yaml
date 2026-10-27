@@ -1,0 +1,41 @@
+---
+# HOMELAB-17: two VyOS routers sharing a VRRP next hop on VLAN 40, with iBGP between them
+# and eBGP peer groups staged for the Tier 2 Cilium speakers.
+# Design: homelab-odyssey docs/build/tier-0-foundation.md, Phase 0.3.
+ansible_connection: ansible.netcommon.network_cli
+ansible_network_os: vyos.vyos.vyos
+ansible_network_cli_ssh_type: paramiko
+
+# Rolling builds change behavior between snapshots, so both routers must run this one.
+vyos_router_version: 2026.10.07-0712-rolling
+
+vyos_router_address_prefix: 24
+# UniFi owns .1 on VLANs 40, 50 and 60 and stays every host's gateway.
+vyos_router_gateway: 192.168.40.1
+# Without a resolver the default time*.vyos.net NTP servers never sync.
+vyos_router_name_servers:
+  - 192.168.40.1
+
+# The UniFi /28 routes (HOMELAB-18) point here. Only VLAN 40 has a VRRP group: UniFi
+# owns .1 on VLANs 50 and 60, so the design's VLAN50/VLAN60 groups would conflict.
+vyos_router_vrrp:
+  name: VLAN40
+  interface: eth0
+  vrid: 40
+  address: 192.168.40.12/24
+
+vyos_router_bgp_as: 65000
+# No neighbors yet; the Cilium nodes join these groups in Tier 2.
+vyos_router_peer_groups:
+  - name: homelab-prod
+    remote_as: 65001
+  - name: homelab-dev
+    remote_as: 65002
+
+# LoadBalancer blocks UniFi routes to the VIP. Until BGP learns them, a blackhole stops
+# that traffic looping between VyOS's default route and UniFi. Distance 254 loses to
+# any BGP route.
+vyos_router_lb_prefixes:
+  - 192.168.40.240/28
+  - 192.168.50.240/28
+  - 192.168.60.240/28

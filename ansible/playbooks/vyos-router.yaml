@@ -1,0 +1,30 @@
+---
+- name: Configure the VyOS routers one at a time
+  hosts: vyos
+  gather_facts: false
+  serial: 1
+  any_errors_fatal: true
+  tasks:
+    - name: Check the build and identity
+      ansible.builtin.import_role:
+        name: vyos_router
+        tasks_from: preflight
+
+    - name: Apply the declared configuration
+      ansible.builtin.import_role:
+        name: vyos_router
+        tasks_from: configure
+
+- name: Verify the VyOS routers
+  hosts: vyos
+  gather_facts: false
+  vars:
+    # A canary run (--limit) has no configured peer yet, so skip the pair checks.
+    vyos_router_verify_pair: "{{ ansible_play_hosts_all | sort == groups['vyos'] | sort }}"
+  tasks:
+    # Check mode predicts changes it did not make, so post-change assertions would fail.
+    - name: Verify the router
+      ansible.builtin.include_role:
+        name: vyos_router
+        tasks_from: verify
+      when: not ansible_check_mode

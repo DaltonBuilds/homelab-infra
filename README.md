@@ -14,20 +14,21 @@ homelab-infra/
 ├── docs/ansible-structure.md        # diagram of how playbooks, roles and inventory connect
 ├── ansible/
 │   ├── ansible.cfg
-│   ├── requirements.yml             # pinned collections, when added
+│   ├── requirements.yml             # pinned collections (vyos.vyos, ansible.netcommon)
 │   ├── inventories/homelab/         # hosts, group_vars, host_vars
-│   ├── playbooks/                   # pve-*, plus ts-router and ts-router-verify
+│   ├── playbooks/                   # pve-*, ts-router*, ts-exit-node*, vyos-router*
 │   └── roles/
 │       ├── pve_baseline/            # fleet APT, time, notification checks and verification
 │       ├── pve_update/              # gated one-host-at-a-time upgrade and reboot
 │       ├── pve_network/             # declared /etc/network/interfaces with automatic rollback
 │       ├── pve_gpu/                 # pve-07 GPU inspect, preflight, configure, verify
-│       └── ts_router/               # Tailscale subnet router container on pve-03
+│       ├── ts_router/               # Tailscale subnet router container on pve-03
+│       └── vyos_router/             # VyOS VRRP next hop and BGP on bgp-01/bgp-02
 ├── tailscale/policy.hujson          # tailnet policy, applied by GitHub Actions
 └── .github/workflows/               # tailscale-policy: test on PR, apply on merge
 ```
 
-From the repo root, `mise install` installs the pinned Ansible CLI. `mise.toml` points `ANSIBLE_CONFIG` at `ansible/ansible.cfg`. Galaxy collections install under `ansible/collections/`, which Git ignores; the current roles use only `ansible.builtin`. Shared values live in `inventories/homelab/group_vars/pve.yaml`; per-host differences live in `host_vars/`. See [Ansible structure](docs/ansible-structure.md) for a diagram of how the pieces connect.
+From the repo root, `mise install` installs the pinned Ansible CLI. `mise.toml` points `ANSIBLE_CONFIG` at `ansible/ansible.cfg`. Galaxy collections install under `ansible/collections/`, which Git ignores: run `mise exec -- ansible-galaxy collection install -r ansible/requirements.yml`. Only `vyos_router` uses them; the other roles use only `ansible.builtin`. Shared values live in `inventories/homelab/group_vars/pve.yaml`; per-host differences live in `host_vars/`. See [Ansible structure](docs/ansible-structure.md) for a diagram of how the pieces connect.
 
 `mise run lint` checks that every YAML file starts with `---`. Install the same check as a Git hook with `mise exec -- pre-commit install`.
 
@@ -198,6 +199,30 @@ The policy does not route to the container, so Ansible reaches it through `Proxy
 **Client.** In the macOS menu, choose **Exit Node → ts-exit-01** and keep **Use Tailscale subnets** on for PVE access. Check with `curl -s ifconfig.me` (the home address) and a DNS leak test. If a captive portal reappears, choose **Exit Node → None**, accept it, then reselect, or enable **Allow Local Network Access**.
 
 **Trade-offs and failure.** Traffic is hidden from the local network, not from the home ISP, and sites see the home address. Throughput is capped by home upload. If home internet, pve-03 or the container is down, the client has no internet while the exit node is selected; choose **None** to fall back to the local network. Keep node-key expiry on for clients, and revoke a lost client in the admin console.
+
+## VyOS routers
+
+`bgp-01` (guest 100 on pve-01, `192.168.40.10`) and `bgp-02` (guest 102 on pve-02, `192.168.40.11`) share the VRRP VIP `192.168.40.12` on VLAN 40, the next hop for UniFi's three LoadBalancer `/28` routes ([HOMELAB-17](https://daltonbuilds.youtrack.cloud/issue/HOMELAB-17), [Phase 0.3](https://github.com/DaltonBuilds/homelab-odyssey/blob/main/docs/build/tier-0-foundation.md)). They run iBGP to each other in AS 65000, with the `homelab-prod` (65001) and `homelab-dev` (65002) peer groups staged, empty, for the Tier 2 Cilium speakers. UniFi stays every host's gateway on VLANs 40, 50 and 60; Proxmox hosts never use the VIP.
+
+```sh
+mise exec -- ansible-playbook ansible/playbooks/vyos-router.yaml --check --diff --limit bgp-02
+mise exec -- ansible-playbook ansible/playbooks/vyos-router.yaml --diff --limit bgp-02
+mise exec -- ansible-playbook ansible/playbooks/vyos-router.yaml --diff
+mise exec -- ansible-playbook ansible/playbooks/vyos-router-verify.yaml
+```
+
+Ansible connects with `network_cli` over paramiko as `vyos`, using the workstation's SSH key and `~/.ssh/known_hosts`; no password is stored. That connection ignores `ProxyJump`, and netcommon 8.7.1 drops `ansible_paramiko_proxy_command`, so remote runs need the Tailscale routes above. Start with bgp-02, the backup, then run both. Each router:
+
+1. must run `vyos_router_version` and carry its inventory address on eth0. Upgrade a router with `add system image` and a reboot, one at a time, before running the play;
+2. gets only the configuration lines it is missing (hostname, resolver, default route, VRRP group, BGP, blackhole routes), committed with a comment and saved. Check mode sets them in a session it then discards, so VyOS still rejects invalid syntax. The play never deletes configuration; remove unwanted lines by hand.
+
+Verification checks hostname, VRRP group and priority, the default route via UniFi, the blackhole routes and name resolution. When both routers are in the run it also requires bgp-01 as `MASTER` holding the VIP, bgp-02 as `BACKUP` without it, and iBGP `Established` both ways, retrying for up to 30 seconds after a commit.
+
+**Design changes from Phase 0.3.** UniFi owns `.1` on VLANs 50 and 60, so the design's VLAN50/VLAN60 VRRP groups are omitted, along with the routers' VLAN 50/60 sub-interfaces until Tier 2 decides how speakers peer. The design's `neighbor-group` is `peer-group` in VyOS, and neighbors need `address-family ipv4-unicast`. The resolver is new: without it the default NTP servers never resolve. The `/28` blackholes at distance 254 are new too: until BGP learns those prefixes, traffic UniFi sends to the VIP would otherwise loop between VyOS's default route and UniFi.
+
+**Failover timing.** With the default 1-second advertisements, the backup takes over about 3.6 seconds after the master goes silent (three intervals plus skew). Preemption returns the VIP to bgp-01 when it comes back.
+
+**Rollback.** Each router has a `fresh-install` Proxmox snapshot, and VyOS keeps 100 commit revisions. `show system commit` lists them and `compare <n>` shows a diff in configuration mode; reverse a change with `set`/`delete`, `commit` and `save`. `rollback <n>` also works but reboots the router. Rolling back the snapshot also restores that snapshot's credentials.
 
 ## Design references
 

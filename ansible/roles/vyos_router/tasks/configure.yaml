@@ -1,0 +1,14 @@
+---
+# Sends only lines missing from the running config, commits and saves. Check mode sets
+# them in a discarded session, so VyOS still rejects bad syntax.
+- name: Apply the declared configuration
+  vyos.vyos.vyos_config:
+    lines: "{{ lookup('ansible.builtin.template', 'config.j2') | split('\n') | select | list }}"
+    comment: "{{ vyos_router_commit_comment }}"
+    save: true
+  register: vyos_router_config
+
+- name: Report the commands sent
+  ansible.builtin.debug:
+    var: vyos_router_config.commands
+  when: vyos_router_config is changed

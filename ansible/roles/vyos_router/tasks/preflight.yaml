@@ -1,0 +1,19 @@
+---
+- name: Read the VyOS version and the eth0 address
+  vyos.vyos.vyos_command:
+    commands:
+      - show version
+      # Matched lines only: the full config carries login hashes.
+      - show configuration commands | match 'interfaces ethernet eth0 address'
+  register: vyos_router_preflight
+
+- name: Require the expected build on the expected router
+  ansible.builtin.assert:
+    that:
+      - vyos_router_preflight.stdout[0] is search('Version:\s+VyOS ' ~ vyos_router_version, multiline=true)
+      - vyos_router_preflight.stdout[1] is search("eth0 address '?" ~ vyos_router_address ~ "'?")
+    fail_msg: >-
+      Expected VyOS {{ vyos_router_version }} with eth0 {{ vyos_router_address }}.
+      Found {{ vyos_router_preflight.stdout[0] | regex_search('Version:.*') }} and
+      {{ vyos_router_preflight.stdout[1] | default('no eth0 address') }}.
+      Upgrade with `add system image` and reboot, or fix the inventory address.

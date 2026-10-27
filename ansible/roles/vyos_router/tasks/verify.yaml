@@ -1,0 +1,56 @@
+---
+# Retries cover the seconds after a commit when iBGP is still opening and the
+# higher-priority router is preempting the VIP.
+- name: Read router state
+  vyos.vyos.vyos_command:
+    commands:
+      - show configuration commands | match 'system host-name'
+      - show vrrp
+      - vtysh -c 'show bgp summary json'
+      - ip -4 -o addr show dev {{ vyos_router_vrrp.interface }}
+      - vtysh -c 'show ip route json'
+      - getent hosts time1.vyos.net
+  register: vyos_router_verify_raw
+  until: >-
+    not vyos_router_verify_pair | bool
+    or (vyos_router_verify_raw.stdout[1] is search('^' ~ vyos_router_vrrp.name ~ '\s.*\s' ~ vyos_router_vrrp_expected_state ~ '\s', multiline=true)
+        and vyos_router_verify_raw.stdout[2] | regex_findall('"state":\s*"Established"') | length == vyos_router_ibgp_peers | length)
+  retries: 10
+  delay: 3
+
+- name: Note router state
+  ansible.builtin.set_fact:
+    vyos_router_verify_vrrp: "{{ vyos_router_verify_raw.stdout[1] | regex_search('^' ~ vyos_router_vrrp.name ~ '\\s+(\\S+)\\s+(\\d+)\\s+(\\S+)\\s+(\\d+)', '\\1', '\\2', '\\3', '\\4', multiline=true) | default([], true) }}"
+    vyos_router_verify_bgp_peers: "{{ ((vyos_router_verify_raw.stdout[2] | from_json).ipv4Unicast | default({})).peers | default({}) }}"
+    vyos_router_verify_routes: "{{ vyos_router_verify_raw.stdout[4] | from_json }}"
+
+- name: Require the declared identity, VRRP group, routes and resolver
+  ansible.builtin.assert:
+    that:
+      - vyos_router_verify_raw.stdout[0] is search("host-name '?" ~ inventory_hostname ~ "'?")
+      - vyos_router_verify_vrrp | length == 4
+      - vyos_router_verify_vrrp[0] == vyos_router_vrrp.interface
+      - vyos_router_verify_vrrp[1] | int == vyos_router_vrrp.vrid
+      - vyos_router_verify_vrrp[3] | int == vyos_router_vrrp_priority
+      - (vyos_router_verify_routes['0.0.0.0/0'] | selectattr('selected', 'defined') | map(attribute='nexthops') | flatten | map(attribute='ip') | list) == [vyos_router_gateway]
+      - vyos_router_lb_prefixes is subset(vyos_router_verify_routes.keys() | list)
+      - vyos_router_verify_raw.stdout[5] | length > 0
+    fail_msg: >-
+      {{ inventory_hostname }} drifted from inventory. VRRP: {{ vyos_router_verify_vrrp }},
+      default route: {{ vyos_router_verify_routes['0.0.0.0/0'] | default('missing') }},
+      routes: {{ vyos_router_verify_routes.keys() | list }},
+      resolver answer: {{ vyos_router_verify_raw.stdout[5] | default('none', true) }}.
+
+# Only the master holds the VIP; a VIP on both means the routers cannot hear each other.
+- name: Require the expected VRRP role, VIP ownership and iBGP sessions
+  ansible.builtin.assert:
+    that:
+      - vyos_router_verify_vrrp[2] == vyos_router_vrrp_expected_state
+      - (vyos_router_verify_raw.stdout[3] is search(' ' ~ vyos_router_vrrp.address ~ ' ')) == (vyos_router_vrrp_expected_state == 'MASTER')
+      - (vyos_router_verify_bgp_peers | dict2items | selectattr('value.state', 'equalto', 'Established') | map(attribute='key') | sort)
+        == (vyos_router_ibgp_peers | map('extract', hostvars, 'ansible_host') | sort)
+    fail_msg: >-
+      Expected {{ vyos_router_vrrp_expected_state }} for {{ vyos_router_vrrp.name }}, found
+      {{ vyos_router_verify_vrrp[2] | default('no group') }}. eth0: {{ vyos_router_verify_raw.stdout[3] }}.
+      BGP peers: {{ vyos_router_verify_bgp_peers | dict2items | map(attribute='key') | zip(vyos_router_verify_bgp_peers | dict2items | map(attribute='value.state')) | list }}.
+  when: vyos_router_verify_pair | bool
