@@ -1,0 +1,9 @@
+---
+- name: Verify the Tailscale exit node without changing it
+  hosts: ts_exit
+  gather_facts: false
+  tasks:
+    - name: Verify the exit node
+      ansible.builtin.include_role:
+        name: ts_router
+        tasks_from: verify

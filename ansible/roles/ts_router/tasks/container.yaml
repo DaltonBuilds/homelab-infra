@@ -55,7 +55,7 @@
       - --hostname
       - "{{ ts_router_hostname }}"
       - --description
-      - Tailscale subnet router for PVE management. Managed by homelab-infra ts-router.yaml (HOMELAB-39).
+      - "{{ ts_router_description }}"
       - --tags
       - tailscale
       - --unprivileged

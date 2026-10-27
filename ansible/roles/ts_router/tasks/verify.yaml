@@ -15,6 +15,13 @@
   changed_when: false
   check_mode: false
 
+- name: Read IPv6 forwarding
+  ansible.builtin.command: /bin/cat /proc/sys/net/ipv6/conf/all/forwarding
+  register: ts_router_verify_forwarding6
+  changed_when: false
+  check_mode: false
+  when: ts_router_exit_node | bool
+
 # PrimaryRoutes lists routes the tailnet approved and this router currently serves.
 - name: Require a running, tagged router serving exactly the approved routes
   ansible.builtin.assert:
@@ -30,6 +37,18 @@
       forwarding {{ ts_router_verify_forwarding.stdout | trim }}.
       Unserved routes usually mean the policy's autoApprovers did not match.
 
+# AllowedIPs carries the exit routes only once the policy has approved them.
+- name: Require an approved exit node with IPv6 forwarding
+  ansible.builtin.assert:
+    that:
+      - ts_router_verify_status.Self.AllowedIPs | default([], true) is superset(['0.0.0.0/0', '::/0'])
+      - ts_router_verify_forwarding6.stdout | trim == '1'
+    fail_msg: >-
+      Exit node is not serving: allowed IPs {{ ts_router_verify_status.Self.AllowedIPs | default([]) }},
+      IPv6 forwarding {{ ts_router_verify_forwarding6.stdout | trim }}.
+      Unapproved exit routes usually mean the policy's autoApprovers.exitNode did not match.
+  when: ts_router_exit_node | bool
+
 - name: Require the LAN leg to reach every PVE UI and SSH port
   ansible.builtin.wait_for:
     host: "{{ item.0 }}"
@@ -38,6 +57,7 @@
   loop: "{{ groups['pve'] | map('extract', hostvars, 'ansible_host') | product([8006, 22]) | list }}"
   loop_control:
     label: "{{ item.0 }}:{{ item.1 }}"
+  when: ts_router_routes | length > 0
 
 # Tagged nodes have key expiry disabled by default; a date here means it was re-enabled.
 - name: Report node key expiry

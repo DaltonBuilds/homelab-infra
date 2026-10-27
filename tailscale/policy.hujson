@@ -1,4 +1,5 @@
-// Tailnet policy for restricted PVE remote management (ADR-013, HOMELAB-39).
+// Tailnet policy for restricted PVE remote management (ADR-013, HOMELAB-39) and the
+// public Wi-Fi exit node (HOMELAB-41).
 // Applied by .github/workflows/tailscale-policy.yaml. Console edits are overwritten.
 //
 // This file is the whole policy: anything not granted below is denied, including
@@ -20,6 +21,7 @@
 
 	"tagOwners": {
 		"tag:pve-mgmt-router": ["autogroup:admin"],
+		"tag:exit-node":       ["autogroup:admin"],
 	},
 
 	// Only the router tag may advertise these routes, and only these /32s are approved
@@ -34,6 +36,8 @@
 			"192.168.40.65/32": ["tag:pve-mgmt-router"],
 			"192.168.40.66/32": ["tag:pve-mgmt-router"],
 		},
+		// Only the exit node tag. The management router must never carry internet traffic.
+		"exitNode": ["tag:exit-node"],
 	},
 
 	// Web UI, noVNC/xterm.js consoles (proxied over 8006) and SSH. Nothing else.
@@ -42,6 +46,13 @@
 			"src": ["ADMIN_LOGIN"],
 			"dst": ["pve-01", "pve-02", "pve-03", "pve-04", "pve-05", "pve-06", "pve-07"],
 			"ip":  ["tcp:8006", "tcp:22"],
+		},
+		// Internet egress through the exit node. autogroup:internet excludes private
+		// ranges, so using the exit node opens nothing on the LAN.
+		{
+			"src": ["ADMIN_LOGIN"],
+			"dst": ["autogroup:internet"],
+			"ip":  ["*"],
 		},
 	],
 
@@ -57,20 +68,29 @@
 				"192.168.40.64:8006", "192.168.40.64:22",
 				"192.168.40.65:8006", "192.168.40.65:22",
 				"192.168.40.66:8006", "192.168.40.66:22",
+				// Internet through the exit node.
+				"1.1.1.1:443", "8.8.8.8:53",
 			],
 			"deny": [
 				// Other ports on a PVE host: SPICE proxy, HTTPS, corosync.
 				"192.168.40.50:3128", "192.168.40.50:443", "192.168.40.66:5405",
 				// Other VLAN 40 services and the gateway.
 				"192.168.40.1:443", "192.168.40.10:22", "192.168.40.20:8200",
-				// The router itself and guest VLANs.
-				"192.168.40.13:22", "192.168.50.30:6443",
+				// The routers themselves and guest VLANs.
+				"192.168.40.13:22", "192.168.40.14:22", "192.168.50.30:6443",
+				// Other private ranges are not internet.
+				"10.0.0.1:443", "172.16.0.1:443",
 			],
 		},
 		{
 			// The router tag is a route carrier, not a management identity.
 			"src": "tag:pve-mgmt-router",
 			"deny": ["192.168.40.50:8006", "192.168.40.50:22"],
+		},
+		{
+			// The exit node carries client traffic; it is not a management identity.
+			"src": "tag:exit-node",
+			"deny": ["192.168.40.50:8006", "192.168.40.50:22", "1.1.1.1:443"],
 		},
 	],
 }

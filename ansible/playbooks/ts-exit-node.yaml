@@ -1,0 +1,32 @@
+---
+- name: Create the Tailscale exit node container on its PVE node
+  hosts: ts_exit
+  gather_facts: false
+  tasks:
+    - name: Create or check the container
+      ansible.builtin.import_role:
+        name: ts_router
+        tasks_from: container
+
+- name: Configure and enroll the Tailscale exit node
+  hosts: ts_exit
+  gather_facts: false
+  tasks:
+    - name: Stop here in check mode when the container does not exist yet
+      ansible.builtin.meta: end_host
+      when: ansible_check_mode and ts_router_guest == {}
+
+    - name: Gather facts from the container
+      ansible.builtin.setup:
+
+    - name: Configure Tailscale
+      ansible.builtin.import_role:
+        name: ts_router
+        tasks_from: configure
+
+    # Check mode predicts changes it did not make, so post-change assertions would fail.
+    - name: Verify the exit node
+      ansible.builtin.include_role:
+        name: ts_router
+        tasks_from: verify
+      when: not ansible_check_mode

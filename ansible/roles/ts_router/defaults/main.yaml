@@ -8,3 +8,11 @@ ts_router_apt_uri: https://pkgs.tailscale.com/stable/debian
 # Supplied at enrollment only: a pre-approved, tagged, single-use key with a short expiry.
 # Read from the workstation environment so it never reaches inventory or Git.
 ts_router_auth_key: "{{ lookup('ansible.builtin.env', 'TS_AUTHKEY') }}"
+
+# Subnet routes to advertise. Group vars set these; an exit node may advertise none.
+ts_router_routes: []
+# Advertise this node as an exit node (0.0.0.0/0 and ::/0). The policy must auto-approve it.
+ts_router_exit_node: false
+ts_router_description: Tailscale subnet router for PVE management. Managed by homelab-infra ts-router.yaml (HOMELAB-39).
+# What tailscale reports as advertised: the subnet routes plus the exit routes.
+ts_router_advertised_routes: "{{ (ts_router_routes + (['0.0.0.0/0', '::/0'] if ts_router_exit_node | bool else [])) | sort }}"
