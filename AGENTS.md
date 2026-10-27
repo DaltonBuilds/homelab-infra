@@ -7,7 +7,7 @@ This repository implements homelab automation. Design and acceptance criteria li
 - Baseline spec: `../homelab-odyssey/docs/build/proxmox-baseline.md`
 - Decision: ADR-013 in `../homelab-odyssey/docs/build/01-adrs.md`
 
-Current work is the Phase 0.1 Proxmox post-install baseline for the seven `homelab-pve` hosts. Firmware setup, disk selection, and the initial USB install stay manual. OpenTofu is not in this repo yet. When it is added, it provisions guests only. It does not install hypervisors or change cluster membership. The exception is `ts-router-01` (guest 110 on pve-03), the Tailscale router that Ansible creates as Tier 0 bootstrap infrastructure. Import it into OpenTofu; do not recreate it.
+Current work is the Phase 0.1 Proxmox post-install baseline for the seven `homelab-pve` hosts. Firmware setup, disk selection, and the initial USB install stay manual. OpenTofu is not in this repo yet. When it is added, it provisions guests only. It does not install hypervisors or change cluster membership. The exceptions are two Tailscale guests on pve-03 that Ansible creates: `ts-router-01` (guest 110), the Tier 0 bootstrap router for PVE management, and `ts-exit-01` (guest 111), the exit node for remote work on public Wi-Fi. Import both into OpenTofu; do not recreate them.
 
 ## Ansible
 
