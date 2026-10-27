@@ -59,6 +59,14 @@
     label: "{{ item.0 }}:{{ item.1 }}"
   when: ts_router_routes | length > 0
 
+- name: Require the LAN leg to reach every VyOS router's SSH port
+  ansible.builtin.wait_for:
+    host: "{{ item }}"
+    port: 22
+    timeout: 5
+  loop: "{{ groups['vyos'] | default([]) | map('extract', hostvars, 'ansible_host') | list }}"
+  when: ts_router_routes | length > 0
+
 # Tagged nodes have key expiry disabled by default; a date here means it was re-enabled.
 - name: Report node key expiry
   ansible.builtin.debug:

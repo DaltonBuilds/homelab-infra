@@ -33,3 +33,12 @@ all:
           ansible_host: 192.168.40.14
       vars:
         ansible_user: root
+    # HOMELAB-17: VyOS VRRP/BGP routers, guest 100 on pve-01 and guest 102 on pve-02.
+    vyos:
+      hosts:
+        bgp-01:
+          ansible_host: 192.168.40.10
+        bgp-02:
+          ansible_host: 192.168.40.11
+      vars:
+        ansible_user: vyos

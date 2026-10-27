@@ -1,5 +1,5 @@
-// Tailnet policy for restricted PVE remote management (ADR-013, HOMELAB-39) and the
-// public Wi-Fi exit node (HOMELAB-41).
+// Tailnet policy for restricted PVE and VyOS remote management (ADR-013, HOMELAB-39,
+// HOMELAB-17) and the public Wi-Fi exit node (HOMELAB-41).
 // Applied by .github/workflows/tailscale-policy.yaml. Console edits are overwritten.
 //
 // This file is the whole policy: anything not granted below is denied, including
@@ -17,6 +17,9 @@
 		"pve-05": "192.168.40.64",
 		"pve-06": "192.168.40.65",
 		"pve-07": "192.168.40.66",
+		// VyOS routers (HOMELAB-17). Their own addresses only, never the VRRP VIP .12.
+		"bgp-01": "192.168.40.10",
+		"bgp-02": "192.168.40.11",
 	},
 
 	"tagOwners": {
@@ -35,6 +38,8 @@
 			"192.168.40.64/32": ["tag:pve-mgmt-router"],
 			"192.168.40.65/32": ["tag:pve-mgmt-router"],
 			"192.168.40.66/32": ["tag:pve-mgmt-router"],
+			"192.168.40.10/32": ["tag:pve-mgmt-router"],
+			"192.168.40.11/32": ["tag:pve-mgmt-router"],
 		},
 		// Only the exit node tag. The management router must never carry internet traffic.
 		"exitNode": ["tag:exit-node"],
@@ -46,6 +51,12 @@
 			"src": ["ADMIN_LOGIN"],
 			"dst": ["pve-01", "pve-02", "pve-03", "pve-04", "pve-05", "pve-06", "pve-07"],
 			"ip":  ["tcp:8006", "tcp:22"],
+		},
+		// SSH to the VyOS routers for Ansible and their CLI. They serve no web UI.
+		{
+			"src": ["ADMIN_LOGIN"],
+			"dst": ["bgp-01", "bgp-02"],
+			"ip":  ["tcp:22"],
 		},
 		// Internet egress through the exit node. autogroup:internet excludes private
 		// ranges, so using the exit node opens nothing on the LAN.
@@ -68,6 +79,7 @@
 				"192.168.40.64:8006", "192.168.40.64:22",
 				"192.168.40.65:8006", "192.168.40.65:22",
 				"192.168.40.66:8006", "192.168.40.66:22",
+				"192.168.40.10:22", "192.168.40.11:22",
 				// Internet through the exit node.
 				"1.1.1.1:443", "8.8.8.8:53",
 			],
@@ -75,8 +87,10 @@
 				// Other ports on a PVE host: SPICE proxy, HTTPS, corosync.
 				"192.168.40.50:3128", "192.168.40.50:443", "192.168.40.66:5405",
 				// Other VLAN 40 services and the gateway.
-				"192.168.40.1:443", "192.168.40.10:22", "192.168.40.20:8200",
-				// The routers themselves and guest VLANs.
+				"192.168.40.1:443", "192.168.40.20:8200",
+				// BGP and HTTPS on a VyOS router, and SSH to the VRRP VIP.
+				"192.168.40.10:179", "192.168.40.11:443", "192.168.40.12:22",
+				// The Tailscale routers themselves and guest VLANs.
 				"192.168.40.13:22", "192.168.40.14:22", "192.168.50.30:6443",
 				// Other private ranges are not internet.
 				"10.0.0.1:443", "172.16.0.1:443",
@@ -85,7 +99,7 @@
 		{
 			// The router tag is a route carrier, not a management identity.
 			"src": "tag:pve-mgmt-router",
-			"deny": ["192.168.40.50:8006", "192.168.40.50:22"],
+			"deny": ["192.168.40.50:8006", "192.168.40.50:22", "192.168.40.10:22"],
 		},
 		{
 			// The exit node carries client traffic; it is not a management identity.

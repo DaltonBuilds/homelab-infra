@@ -25,5 +25,6 @@ ts_router_domain: homelab.internal
 ts_router_admin_ssh_public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICJhM8FK0OMcpiXpTPgry8BkoxlNSx6VrVuQKIyJYyVA homelab-admin"
 
 ts_router_tag: tag:pve-mgmt-router
-# Only the seven PVE management addresses, derived from inventory.
-ts_router_routes: "{{ groups['pve'] | map('extract', hostvars, 'ansible_host') | map('regex_replace', '$', '/32') | sort }}"
+# Only the seven PVE management addresses and the two VyOS router addresses, derived
+# from inventory. Never the VRRP VIP: it moves between routers and carries no management.
+ts_router_routes: "{{ (groups['pve'] + groups['vyos']) | map('extract', hostvars, 'ansible_host') | map('regex_replace', '$', '/32') | sort }}"
