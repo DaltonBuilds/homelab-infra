@@ -1,14 +1,24 @@
 ---
-# Sends only lines missing from the running config, commits and saves. Check mode sets
+# Sends only lines missing from the running config and commits them. Check mode sets
 # them in a discarded session, so VyOS still rejects bad syntax.
 - name: Apply the declared configuration
   vyos.vyos.vyos_config:
     lines: "{{ lookup('ansible.builtin.template', 'config.j2') | split('\n') | select | list }}"
     comment: "{{ vyos_router_commit_comment }}"
-    save: true
   register: vyos_router_config
 
 - name: Report the commands sent
   ansible.builtin.debug:
     var: vyos_router_config.commands
   when: vyos_router_config is changed
+
+# Not the module's save option: it compares `compare saved` output that arrives with a
+# bracketed-paste escape, so it saves and reports a change on every run.
+- name: Save the committed configuration for the next boot
+  vyos.vyos.vyos_command:
+    commands:
+      - /usr/libexec/vyos/vyos-save-config.py
+  changed_when: true
+  when:
+    - vyos_router_config is changed
+    - not ansible_check_mode
