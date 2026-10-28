@@ -1,0 +1,24 @@
+set system host-name '{{ inventory_hostname }}'
+{% for server in vyos_router_name_servers %}
+set system name-server '{{ server }}'
+{% endfor %}
+set interfaces ethernet eth0 address '{{ vyos_router_address }}'
+set protocols static route 0.0.0.0/0 next-hop '{{ vyos_router_gateway }}'
+{% for prefix in vyos_router_lb_prefixes %}
+set protocols static route {{ prefix }} blackhole distance '254'
+{% endfor %}
+set high-availability vrrp group {{ vyos_router_vrrp.name }} interface '{{ vyos_router_vrrp.interface }}'
+set high-availability vrrp group {{ vyos_router_vrrp.name }} vrid '{{ vyos_router_vrrp.vrid }}'
+set high-availability vrrp group {{ vyos_router_vrrp.name }} priority '{{ vyos_router_vrrp_priority }}'
+set high-availability vrrp group {{ vyos_router_vrrp.name }} address {{ vyos_router_vrrp.address }}
+set protocols bgp system-as '{{ vyos_router_bgp_as }}'
+set protocols bgp parameters router-id '{{ ansible_host }}'
+{% for peer in vyos_router_ibgp_peers %}
+set protocols bgp neighbor {{ hostvars[peer].ansible_host }} remote-as '{{ vyos_router_bgp_as }}'
+set protocols bgp neighbor {{ hostvars[peer].ansible_host }} description 'iBGP to {{ peer }}'
+set protocols bgp neighbor {{ hostvars[peer].ansible_host }} address-family ipv4-unicast
+{% endfor %}
+{% for group in vyos_router_peer_groups %}
+set protocols bgp peer-group {{ group.name }} remote-as '{{ group.remote_as }}'
+set protocols bgp peer-group {{ group.name }} address-family ipv4-unicast
+{% endfor %}

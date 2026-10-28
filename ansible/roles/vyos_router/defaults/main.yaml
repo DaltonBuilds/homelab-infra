@@ -1,0 +1,14 @@
+---
+vyos_router_address: "{{ ansible_host }}/{{ vyos_router_address_prefix }}"
+vyos_router_ibgp_peers: "{{ groups['vyos'] | difference([inventory_hostname]) | sort }}"
+
+# The highest priority in the group should hold the VIP; everyone else is backup.
+vyos_router_vrrp_expected_state: >-
+  {{ 'MASTER' if vyos_router_vrrp_priority | int
+     == (groups['vyos'] | map('extract', hostvars, 'vyos_router_vrrp_priority') | map('int') | max)
+     else 'BACKUP' }}
+
+# Cross-router checks (iBGP and VRRP roles) need both routers configured.
+vyos_router_verify_pair: true
+
+vyos_router_commit_comment: homelab-infra vyos_router (HOMELAB-17)

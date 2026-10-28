@@ -1,0 +1,9 @@
+---
+- name: Verify the VyOS routers without changing them
+  hosts: vyos
+  gather_facts: false
+  tasks:
+    - name: Verify the router
+      ansible.builtin.include_role:
+        name: vyos_router
+        tasks_from: verify

@@ -3,6 +3,10 @@
 # Losing pve-03 removes remote access; local LAN and console management are the fallback.
 ansible_python_interpreter: /usr/bin/python3
 
+# The tailnet policy does not reach this container, so remote runs jump through pve-03.
+# On the LAN the jump still works, so there is one path everywhere.
+ansible_ssh_common_args: -o ProxyJump=root@192.168.40.58
+
 ts_router_pve_node: pve-03
 # 100 and 102 are bgp-01/bgp-02 (checked 2026-10-11). Keep this ID unique cluster-wide.
 ts_router_vmid: 110

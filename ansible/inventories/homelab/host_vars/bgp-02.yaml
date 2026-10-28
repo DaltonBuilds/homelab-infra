@@ -1,0 +1,3 @@
+---
+# Guest 102 on pve-02. Normally the VRRP backup.
+vyos_router_vrrp_priority: 100

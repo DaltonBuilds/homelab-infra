@@ -1,0 +1,11 @@
+---
+# Install with: mise exec -- ansible-galaxy collection install -r ansible/requirements.yml
+# Installs under ansible/collections/, which Git ignores.
+collections:
+  # VyOS routers (HOMELAB-17). netcommon provides network_cli; utils is its dependency.
+  - name: vyos.vyos
+    version: 6.1.0
+  - name: ansible.netcommon
+    version: 8.7.1
+  - name: ansible.utils
+    version: 6.1.1

@@ -1,0 +1,3 @@
+---
+# Guest 100 on pve-01. Normally the VRRP master.
+vyos_router_vrrp_priority: 200
