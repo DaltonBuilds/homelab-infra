@@ -6,9 +6,8 @@
 ui            = true
 api_addr      = "http://{{ ansible_host }}:{{ vault_baseline_api_port }}"
 cluster_addr  = "https://{{ ansible_host }}:{{ vault_baseline_cluster_port }}"
-# The packaged unit bounds capabilities to CAP_SYSLOG, so mlock cannot work, and it is
-# discouraged with integrated storage. Swap is off and the unit sets MemorySwapMax=0.
-disable_mlock = true
+# No disable_mlock: OpenBao 2.0 removed mlock (GH-363); 2.6 flags the key as unknown. Swap is
+# off and the unit sets MemorySwapMax=0.
 
 listener "tcp" {
   address         = "0.0.0.0:{{ vault_baseline_api_port }}"

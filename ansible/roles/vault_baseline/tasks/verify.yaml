@@ -26,7 +26,7 @@
       listeners: /usr/bin/ss -Htln
       bao_data: /usr/bin/find {{ vault_baseline_openbao_data_dir }} -mindepth 1 -print -quit
       bao_perms: /usr/bin/stat -c '%n %U:%G %a' {{ vault_baseline_openbao_config_path }} {{ vault_baseline_openbao_data_dir }}
-      bao_config: /usr/bin/grep -cE '^disable_mlock += true$|^ +node_id += "{{ inventory_hostname }}"$' {{ vault_baseline_openbao_config_path }}
+      bao_config: /usr/bin/grep -cE '^ +node_id += "{{ inventory_hostname }}"$|^disable_mlock' {{ vault_baseline_openbao_config_path }}
 
 - name: Index node state by name
   ansible.builtin.set_fact:
@@ -100,15 +100,15 @@
     st: "{{ vault_baseline_state_by_name }}"
   when: not vault_baseline_openbao_enabled | bool
 
-# HOMELAB-30. The grep counts two lines: disable_mlock and this node's node_id.
+# HOMELAB-30. The grep must find this node's node_id and no disable_mlock, which OpenBao 2.x flags as unknown.
 - name: Verify the OpenBao configuration and data directory
   ansible.builtin.assert:
     that:
       - st.bao_perms.stdout_lines == [vault_baseline_openbao_config_path ~ ' root:openbao 640', vault_baseline_openbao_data_dir ~ ' openbao:openbao 750']
-      - st.bao_config.stdout | trim == '2'
+      - st.bao_config.stdout | trim == '1'
     fail_msg: >-
       OpenBao config or data directory on {{ inventory_hostname }} differs: {{ st.bao_perms.stdout_lines }},
-      {{ st.bao_config.stdout | trim }}/2 expected lines. Run vault-baseline.yaml.
+      {{ st.bao_config.stdout | trim }} matching lines (expected only node_id). Run vault-baseline.yaml.
   vars:
     st: "{{ vault_baseline_state_by_name }}"
 
