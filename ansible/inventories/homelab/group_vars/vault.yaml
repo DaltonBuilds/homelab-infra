@@ -36,3 +36,7 @@ vault_vm_admin_ssh_public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICJhM8FK0OMc
 # (2026-10-28).
 vault_baseline_openbao_version: 2.6.5
 vault_baseline_openbao_sha256: e03bc9486db4153ef96b224df183790780c99711cdee7505ee3cd1546bca872e
+
+# HOMELAB-30: openbao.hcl is in place on all three nodes (2026-10-29). Start the service.
+# Each node comes up sealed; init and unseal are manual (HOMELAB-32/33).
+vault_baseline_openbao_enabled: true
