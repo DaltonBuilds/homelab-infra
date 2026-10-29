@@ -1,0 +1,63 @@
+---
+# Read-only. Runs against the vault inventory host; every task executes on its PVE node.
+# Keep this file when create.yaml retires at Tier 1 [1.3] (HOMELAB-21 Lifecycle).
+- name: Require one Raft node per PVE host and unique guest IDs in inventory
+  ansible.builtin.assert:
+    that:
+      - groups['vault'] | map('extract', hostvars, 'vault_vm_pve_node') | unique | length == groups['vault'] | length
+      - groups['vault'] | map('extract', hostvars, 'vault_vm_vmid') | unique | length == groups['vault'] | length
+    fail_msg: Two vault nodes share a PVE host or guest ID in inventory. ADR-011 requires one Raft voter per hypervisor.
+  run_once: true
+
+- name: Read cluster guests
+  ansible.builtin.command: /usr/bin/pvesh get /cluster/resources --type vm --output-format json
+  register: vault_vm_guests_raw
+  changed_when: false
+  check_mode: false
+  # Right after qm create, the cluster cache lists the guest as "VM <id>" until
+  # pvestatd's next pass, a few seconds later.
+  retries: 6
+  delay: 5
+  until: vault_vm_guests_raw.stdout | from_json | selectattr('vmid', 'equalto', vault_vm_vmid | int) | selectattr('name', 'equalto', 'VM ' ~ vault_vm_vmid) | list == []
+  delegate_to: "{{ vault_vm_pve_node }}"
+
+- name: Find the guest that holds the node's ID
+  ansible.builtin.set_fact:
+    vault_vm_guest: "{{ vault_vm_guests_raw.stdout | from_json | selectattr('vmid', 'equalto', vault_vm_vmid | int) | first | default({}) }}"
+    vault_vm_named: "{{ vault_vm_guests_raw.stdout | from_json | selectattr('name', 'defined') | selectattr('name', 'equalto', vault_vm_hostname) | list }}"
+
+- name: Refuse to reuse a guest ID that belongs to something else
+  ansible.builtin.assert:
+    that:
+      - vault_vm_guest == {} or (vault_vm_guest.type == 'qemu' and vault_vm_guest.name == vault_vm_hostname and vault_vm_guest.node == vault_vm_pve_node)
+    fail_msg: >-
+      Guest {{ vault_vm_vmid }} is {{ vault_vm_guest.type | default('') }} {{ vault_vm_guest.name | default('') }}
+      on {{ vault_vm_guest.node | default('') }}. Pick an unused vault_vm_vmid, or move the guest back to {{ vault_vm_pve_node }}.
+
+- name: Refuse a second guest with the same name under another ID
+  ansible.builtin.assert:
+    that:
+      - vault_vm_named | rejectattr('vmid', 'equalto', vault_vm_vmid | int) | list == []
+    fail_msg: "{{ vault_vm_hostname }} already exists as guest {{ vault_vm_named | map(attribute='vmid') | join(', ') }}."
+
+- name: Read the VM configuration
+  ansible.builtin.command: /usr/sbin/qm config {{ vault_vm_vmid }}
+  register: vault_vm_qm_config
+  changed_when: false
+  check_mode: false
+  delegate_to: "{{ vault_vm_pve_node }}"
+  when: vault_vm_guest != {} or (vault_vm_created | default(false) and not ansible_check_mode)
+
+- name: Require the VM to match inventory
+  ansible.builtin.assert:
+    that:
+      - vault_vm_qm_config.stdout is search('(?m)^name:\s' ~ (vault_vm_hostname | regex_escape) ~ '$')
+      - vault_vm_qm_config.stdout is search('(?m)^onboot:\s1$')
+      - vault_vm_qm_config.stdout is search('(?m)^agent:\s(1|enabled=1)(,|$)')
+      - vault_vm_qm_config.stdout is search('(?m)^cores:\s' ~ vault_vm_cores ~ '$')
+      - vault_vm_qm_config.stdout is search('(?m)^memory:\s' ~ vault_vm_memory_mb ~ '$')
+      - vault_vm_qm_config.stdout is search('(?m)^scsi0:\s' ~ (vault_vm_disk_storage | regex_escape) ~ ':.*size=' ~ vault_vm_disk_gb ~ 'G(,|$)')
+      - vault_vm_qm_config.stdout is search('(?m)^cicustom:\s.*network=local:snippets/' ~ (vault_vm_network_snippet | regex_escape) ~ '(,|$)')
+      - vault_vm_qm_config.stdout is search('(?m)^cicustom:\s.*vendor=local:snippets/' ~ (vault_vm_vendor_snippet | regex_escape) ~ '(,|$)')
+    fail_msg: VM {{ vault_vm_vmid }} differs from inventory. Review `qm config {{ vault_vm_vmid }}`; this play does not change an existing VM.
+  when: vault_vm_qm_config is not skipped

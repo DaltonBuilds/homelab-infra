@@ -1,0 +1,17 @@
+---
+vault_vm_hostname: "{{ inventory_hostname }}"
+vault_vm_description: OpenBao Raft node. Managed by homelab-infra vault-vm.yaml (HOMELAB-21).
+vault_vm_admin_user: dalton
+
+# Staged on each PVE node under its image file name plus serial, so a new pin never
+# overwrites the disk an existing VM was built from.
+vault_vm_image_path: /var/lib/vz/import/ubuntu-26.04-server-cloudimg-amd64-{{ vault_vm_image_serial }}.qcow2
+
+# Per-VM cloud-init snippets on the node's local storage (snippets enabled by pve_baseline).
+vault_vm_snippet_dir: /var/lib/vz/snippets
+vault_vm_network_snippet: "{{ vault_vm_hostname }}-network.yaml"
+vault_vm_vendor_snippet: "{{ vault_vm_hostname }}-vendor.yaml"
+
+# Upgrade and reboot only right after creation. Set true to repeat that on a running
+# node in a maintenance window.
+vault_vm_upgrade: false

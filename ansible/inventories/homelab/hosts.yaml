@@ -42,3 +42,14 @@ all:
           ansible_host: 192.168.40.11
       vars:
         ansible_user: vyos
+    # HOMELAB-21: OpenBao Raft nodes, one per hypervisor; vault-0N lives on pve-0N.
+    vault:
+      hosts:
+        vault-01:
+          ansible_host: 192.168.40.20
+        vault-02:
+          ansible_host: 192.168.40.21
+        vault-03:
+          ansible_host: 192.168.40.22
+      vars:
+        ansible_user: dalton

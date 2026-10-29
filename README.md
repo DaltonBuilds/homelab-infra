@@ -16,14 +16,15 @@ homelab-infra/
 │   ├── ansible.cfg
 │   ├── requirements.yml             # pinned collections (vyos.vyos, ansible.netcommon)
 │   ├── inventories/homelab/         # hosts, group_vars, host_vars
-│   ├── playbooks/                   # pve-*, ts-router*, ts-exit-node*, vyos-router*
+│   ├── playbooks/                   # pve-*, ts-router*, ts-exit-node*, vyos-router*, vault-vm
 │   └── roles/
-│       ├── pve_baseline/            # fleet APT, time, notification checks and verification
+│       ├── pve_baseline/            # fleet APT, time, local storage content, notification checks and verification
 │       ├── pve_update/              # gated one-host-at-a-time upgrade and reboot
 │       ├── pve_network/             # declared /etc/network/interfaces with automatic rollback
 │       ├── pve_gpu/                 # pve-07 GPU inspect, preflight, configure, verify
 │       ├── ts_router/               # Tailscale subnet router container on pve-03
-│       └── vyos_router/             # VyOS VRRP next hop and BGP on bgp-01/bgp-02
+│       ├── vyos_router/             # VyOS VRRP next hop and BGP on bgp-01/bgp-02
+│       └── vault_vm/                # OpenBao VMs vault-01/02/03: create, check, bootstrap
 ├── tailscale/policy.hujson          # tailnet policy, applied by GitHub Actions
 └── .github/workflows/               # tailscale-policy: test on PR, apply on merge
 ```
@@ -223,6 +224,32 @@ Verification checks hostname, VRRP group and priority, the default route via Uni
 **Failover timing.** With the default 1-second advertisements, the backup takes over about 3.6 seconds after the master goes silent (three intervals plus skew). Preemption returns the VIP to bgp-01 when it comes back.
 
 **Rollback.** Each router has a `fresh-install` Proxmox snapshot, and VyOS keeps 100 commit revisions. `show system commit` lists them and `compare <n>` shows a diff in configuration mode; reverse a change with `set`/`delete`, `commit` and `save`. `rollback <n>` also works but reboots the router. Rolling back the snapshot also restores that snapshot's credentials.
+
+## OpenBao VMs
+
+`vault-01`, `vault-02` and `vault-03` (guests 120/121/122 at `192.168.40.20`/`.21`/`.22`) are the three Raft nodes for OpenBao, one per hypervisor: vault-0N runs on pve-0N ([HOMELAB-21](https://daltonbuilds.youtrack.cloud/issue/HOMELAB-21), [ADR-011](https://github.com/DaltonBuilds/homelab-odyssey/blob/main/docs/build/01-adrs.md)). This is Tier 0 bootstrap: nothing here authenticates to OpenBao, so Ansible creates them. OpenTofu imports them at Tier 1.
+
+```sh
+mise exec -- ansible-playbook ansible/playbooks/vault-vm.yaml --check --diff --limit vault-03
+mise exec -- ansible-playbook ansible/playbooks/vault-vm.yaml --diff --limit vault-03
+mise exec -- ansible-playbook ansible/playbooks/vault-vm.yaml --diff
+```
+
+One node at a time; vault-01 last, because pve-01 also runs bgp-01. Each run:
+
+1. checks inventory and the cluster (`checks.yaml`, read-only): one node per host, unique guest IDs, no other guest holding the ID or name, and an existing VM matching inventory (name, cores, memory, disk, agent, onboot, cloud-init snippets). It never changes an existing VM;
+2. creates a missing VM (`create.yaml`): refuses if the address answers ping, stages the pinned Ubuntu cloud image under `/var/lib/vz/import/` and verifies its SHA256, runs `qm create`, writes the VM's network and vendor snippets to `/var/lib/vz/snippets/`, attaches them with `cicustom`, grows the disk to 20G and boots it. It then waits for the guest agent and for first-boot cloud-init;
+3. bootstraps over SSH as `dalton` (`bootstrap.yaml`): checks the OS, hostname and address, installs and starts `qemu-guest-agent`, checks that the agent answers the PVE node, compares the workstation's trusted host key with the key read through the agent, and requires key-only SSH. Only the run that created the VM upgrades and reboots it; add `-e vault_vm_upgrade=true` to repeat that later.
+
+**Why snippets.** Proxmox's generated network config renames the NIC to `eth0`. On Ubuntu 26.04's first boot the dracut initrd has already brought the NIC up as `ens18`, so the rename fails and the VM stays on DHCP. The network snippet matches the NIC by MAC without renaming it. `pve_baseline` enables `snippets` on the cluster-wide `local` storage for this. The initrd still takes a short DHCP lease on every boot before the static address replaces it.
+
+**Host keys.** A new VM's first SSH connection accepts its unseen key (`StrictHostKeyChecking=accept-new` in `group_vars/vault.yaml`). The bootstrap then reads the key through the guest agent, over the already-verified SSH session to the PVE node, and fails if they differ.
+
+**Access.** The tailnet policy does not route `.20`–`.22`, so these VMs are reachable from the LAN only.
+
+**Rebuild.** For a node that holds no data yet: `qm destroy <id> --purge 1` on its PVE node, `ssh-keygen -R <address>` on the workstation, then run the play. After Phase 0.5 a node holds Raft data; rebuild it only through the OpenBao recovery procedure.
+
+**Lifecycle.** At Tier 1 [1.3], import the three VMs into OpenTofu state; never recreate them. Then tag the last commit that contains `create.yaml`, delete that file and its include, and replace this section's create step with a pointer to the tag. Only one tool owns the VMs at any time.
 
 ## Design references
 

@@ -1,0 +1,5 @@
+---
+vault_vm_pve_node: pve-02
+# 100/102 are bgp-01/bgp-02, 110/111 are ts-router-01/ts-exit-01 (checked 2026-10-28).
+# The ID ends in the same digits as the address (120 is .20). Keep this ID unique cluster-wide.
+vault_vm_vmid: 121

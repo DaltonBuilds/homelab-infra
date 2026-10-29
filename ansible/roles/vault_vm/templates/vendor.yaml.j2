@@ -1,0 +1,8 @@
+#cloud-config
+# {{ ansible_managed }}
+# The guest agent lets the PVE node read the VM's host key and cloud-init state before
+# the workstation trusts SSH. Upgrades run from Ansible, not first boot.
+packages:
+  - qemu-guest-agent
+runcmd:
+  - [systemctl, start, qemu-guest-agent]

@@ -1,0 +1,31 @@
+---
+# HOMELAB-21: three OpenBao Raft nodes, one per hypervisor (ADR-011, renumbered 2026-10-28).
+# Host vars set each node's PVE host and guest ID.
+ansible_python_interpreter: /usr/bin/python3
+
+# A new VM has a host key nobody has seen yet. accept-new trusts it on first contact
+# only; vault-vm.yaml then checks it against the key read through the guest agent.
+ansible_ssh_common_args: -o StrictHostKeyChecking=accept-new
+
+# Ubuntu publishes cloud images by serial, not point release. Every serial after the
+# 26.04.1 point release carries it. SHA256 from
+# https://cloud-images.ubuntu.com/releases/resolute/release-20261016/SHA256SUMS (2026-10-28).
+vault_vm_image_serial: "20261016"
+vault_vm_image_url: https://cloud-images.ubuntu.com/releases/resolute/release-{{ vault_vm_image_serial }}/ubuntu-26.04-server-cloudimg-amd64.img
+vault_vm_image_sha256: 5645d0318ad21f643ebb1ac4567514620e9893380b07b0201fda163baa5b7eb5
+
+vault_vm_disk_storage: local-lvm
+vault_vm_disk_gb: 20
+vault_vm_cores: 2
+vault_vm_memory_mb: 2048
+
+# .20-.22 did not answer ping or ARP from pve-01/02/03 on 2026-10-28. They must stay
+# outside the UniFi VLAN 40 DHCP range.
+vault_vm_address_prefix: 24
+vault_vm_gateway: 192.168.40.1
+vault_vm_dns_servers:
+  - 192.168.40.1
+vault_vm_domain: homelab.internal
+
+# Public key only. cloud-init installs it for the dalton user at creation.
+vault_vm_admin_ssh_public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICJhM8FK0OMcpiXpTPgry8BkoxlNSx6VrVuQKIyJYyVA homelab-admin"
