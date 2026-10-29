@@ -1,0 +1,6 @@
+---
+- name: Harden the operating system
+  ansible.builtin.import_tasks: hardening.yaml
+
+- name: Install the pinned OpenBao package
+  ansible.builtin.import_tasks: openbao.yaml

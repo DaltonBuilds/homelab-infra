@@ -1,0 +1,99 @@
+---
+# HOMELAB-26. The cloud image already ships without swap, with chrony, and with password
+# SSH off; these tasks hold those in place and add what it lacks.
+- name: Read active swap
+  ansible.builtin.command: /usr/sbin/swapon --noheadings --show=NAME
+  register: vault_baseline_swap
+  changed_when: false
+  check_mode: false
+
+# Secrets must never page to disk.
+- name: Turn off active swap
+  ansible.builtin.command: /usr/sbin/swapoff -a
+  when: vault_baseline_swap.stdout | trim | length > 0
+
+- name: Keep swap off after reboot
+  ansible.builtin.replace:
+    path: /etc/fstab
+    regexp: '^([^#\s]\S*\s+\S+\s+swap\s.*)$'
+    replace: '# \1'
+
+# sshd keeps the first value it reads and includes sshd_config.d/*.conf in name order,
+# so 10- wins over the image's 60-cloudimg-settings.conf.
+- name: Disable root and password SSH logins
+  ansible.builtin.copy:
+    content: |
+      # Managed by homelab-infra vault_baseline (HOMELAB-26).
+      PermitRootLogin no
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+    dest: /etc/ssh/sshd_config.d/10-homelab-hardening.conf
+    owner: root
+    group: root
+    mode: '0644'
+    validate: /usr/sbin/sshd -t -f %s
+  notify: Reload ssh
+
+- name: Set the timezone
+  community.general.timezone:
+    name: "{{ vault_baseline_timezone }}"
+
+- name: Install chrony
+  ansible.builtin.apt:
+    name: chrony
+    cache_valid_time: 3600
+
+# Raft elections and TLS validity both depend on agreeing clocks.
+- name: Run chrony
+  ansible.builtin.systemd_service:
+    name: chrony
+    enabled: true
+    state: started
+
+- name: Install ufw
+  ansible.builtin.apt:
+    name: ufw
+    cache_valid_time: 3600
+
+# Rules go in before the firewall is enabled, so the SSH session running this play is
+# already allowed when the default deny takes effect.
+- name: Allow SSH from management and the workstation
+  community.general.ufw:
+    rule: allow
+    from_ip: "{{ item }}"
+    to_port: "22"
+    proto: tcp
+    comment: ssh
+  loop: "{{ vault_baseline_ssh_sources }}"
+
+- name: Allow the OpenBao API from its clients
+  community.general.ufw:
+    rule: allow
+    from_ip: "{{ item }}"
+    to_port: "{{ vault_baseline_api_port | string }}"
+    proto: tcp
+    comment: openbao-api
+  loop: "{{ vault_baseline_api_sources }}"
+
+- name: Allow Raft traffic from each peer
+  community.general.ufw:
+    rule: allow
+    from_ip: "{{ item }}"
+    to_port: "{{ vault_baseline_cluster_port | string }}"
+    proto: tcp
+    comment: openbao-raft
+  loop: "{{ vault_baseline_cluster_peers }}"
+
+- name: Deny inbound by default
+  community.general.ufw:
+    default: deny
+    direction: incoming
+
+- name: Allow outbound by default
+  community.general.ufw:
+    default: allow
+    direction: outgoing
+
+- name: Enable the firewall
+  community.general.ufw:
+    state: enabled

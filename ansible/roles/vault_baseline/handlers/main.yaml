@@ -1,0 +1,6 @@
+---
+# Existing SSH sessions, including this play's, survive a reload.
+- name: Reload ssh
+  ansible.builtin.systemd_service:
+    name: ssh
+    state: reloaded

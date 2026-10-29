@@ -1,0 +1,51 @@
+---
+# HOMELAB-28: read-only acceptance checks for the three OpenBao VMs before Phase 0.5.
+# Changes nothing; safe to run at any time.
+- name: Check the OpenBao VMs on their PVE nodes
+  hosts: vault
+  gather_facts: false
+  tasks:
+    - name: Check placement and VM configuration
+      ansible.builtin.import_role:
+        name: vault_vm
+        tasks_from: checks
+
+    - name: Require every VM to exist
+      ansible.builtin.assert:
+        that:
+          - vault_vm_guest != {}
+        fail_msg: Guest {{ vault_vm_vmid }} ({{ inventory_hostname }}) does not exist on {{ vault_vm_pve_node }}. Run vault-vm.yaml.
+
+    - name: Check the guest agent, host key and SSH
+      ansible.builtin.import_role:
+        name: vault_vm
+        tasks_from: verify
+
+- name: Check each node's baseline
+  hosts: vault
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Check swap, SSH, time, firewall and OpenBao
+      ansible.builtin.import_role:
+        name: vault_baseline
+        tasks_from: verify
+
+- name: Compare the three nodes
+  hosts: vault
+  gather_facts: false
+  tasks:
+    - name: Require one OpenBao version and one PVE host per node
+      ansible.builtin.assert:
+        that:
+          - nodes | map(attribute='bao') | unique | length == 1
+          - nodes | map(attribute='host') | unique | length == nodes | length
+        fail_msg: "Nodes disagree: {{ nodes }}"
+      run_once: true
+      vars:
+        nodes: "{{ ansible_play_hosts_all | map('extract', hostvars) | map(attribute='vault_baseline_summary') | list }}"
+
+    - name: Show the per-node results
+      ansible.builtin.debug:
+        msg: "{{ ansible_play_hosts_all | map('extract', hostvars) | map(attribute='vault_baseline_summary') | list }}"
+      run_once: true

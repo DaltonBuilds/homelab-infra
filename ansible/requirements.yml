@@ -9,3 +9,6 @@ collections:
     version: 8.7.1
   - name: ansible.utils
     version: 6.1.1
+  # OpenBao VM hardening (HOMELAB-26): ufw and timezone modules.
+  - name: community.general
+    version: 13.5.0

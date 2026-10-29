@@ -1,0 +1,66 @@
+---
+# HOMELAB-27. The package has no apt repository: download the release asset, check it
+# against the pinned digest, install it, and hold it so no apt run replaces it.
+- name: Read the installed OpenBao version
+  ansible.builtin.command: /usr/bin/dpkg-query --showformat=${Version} --show openbao
+  register: vault_baseline_openbao_installed
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+# Check mode downloads nothing, so on a node without the pinned version the remaining
+# tasks have no package, unit or selection to inspect. They report only up to here.
+- name: Note whether this is a dry run of an install
+  ansible.builtin.set_fact:
+    vault_baseline_openbao_dry_install: "{{ ansible_check_mode and vault_baseline_openbao_installed.stdout != vault_baseline_openbao_version }}"
+
+- name: Create the package cache directory
+  ansible.builtin.file:
+    path: "{{ vault_baseline_openbao_package_path | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Download the pinned OpenBao package
+  ansible.builtin.get_url:
+    url: "{{ vault_baseline_openbao_url }}"
+    dest: "{{ vault_baseline_openbao_package_path }}"
+    checksum: sha256:{{ vault_baseline_openbao_sha256 }}
+    owner: root
+    group: root
+    mode: '0644'
+  when: not vault_baseline_openbao_dry_install | bool
+
+# A held package cannot be replaced, so a new pin releases the hold first.
+- name: Release the hold for a version change
+  ansible.builtin.dpkg_selections:
+    name: openbao
+    selection: install
+  when:
+    - vault_baseline_openbao_installed.rc == 0
+    - vault_baseline_openbao_installed.stdout != vault_baseline_openbao_version
+
+# postinst creates the openbao user, a self-signed TLS pair in /opt/openbao/tls and an
+# empty /opt/openbao/data. It does not enable or start the service.
+- name: Install OpenBao
+  ansible.builtin.apt:
+    deb: "{{ vault_baseline_openbao_package_path }}"
+  when:
+    - vault_baseline_openbao_installed.stdout != vault_baseline_openbao_version
+    - not vault_baseline_openbao_dry_install | bool
+
+- name: Hold OpenBao at the pinned version
+  ansible.builtin.dpkg_selections:
+    name: openbao
+    selection: hold
+  when: not vault_baseline_openbao_dry_install | bool
+
+- name: Keep OpenBao stopped and disabled until Phase 0.5
+  ansible.builtin.systemd_service:
+    name: openbao
+    enabled: false
+    state: stopped
+  when:
+    - not vault_baseline_openbao_enabled | bool
+    - not vault_baseline_openbao_dry_install | bool
