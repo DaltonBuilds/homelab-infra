@@ -1,5 +1,5 @@
 ---
-# HOMELAB-28: read-only acceptance checks for the three OpenBao VMs before Phase 0.5.
+# HOMELAB-28/30: read-only acceptance checks for the three OpenBao VMs.
 # Changes nothing; safe to run at any time.
 - name: Check the OpenBao VMs on their PVE nodes
   hosts: vault

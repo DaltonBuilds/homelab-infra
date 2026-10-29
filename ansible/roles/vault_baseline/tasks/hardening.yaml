@@ -75,6 +75,16 @@
     comment: openbao-api
   loop: "{{ vault_baseline_api_sources }}"
 
+- name: Remove API access from networks no longer allowed
+  community.general.ufw:
+    rule: allow
+    from_ip: "{{ item }}"
+    to_port: "{{ vault_baseline_api_port | string }}"
+    proto: tcp
+    comment: openbao-api
+    delete: true
+  loop: "{{ vault_baseline_api_sources_revoked }}"
+
 - name: Allow Raft traffic from each peer
   community.general.ufw:
     rule: allow

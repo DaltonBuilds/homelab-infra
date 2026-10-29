@@ -64,3 +64,46 @@
   when:
     - not vault_baseline_openbao_enabled | bool
     - not vault_baseline_openbao_dry_install | bool
+
+# HOMELAB-30. The package creates the data directory; hold its owner and mode.
+- name: Keep the Raft data directory private to openbao
+  ansible.builtin.file:
+    path: "{{ vault_baseline_openbao_data_dir }}"
+    state: directory
+    owner: openbao
+    group: openbao
+    mode: '0750'
+  when: not vault_baseline_openbao_dry_install | bool
+
+# Replaces the package's default file.
+- name: Write the node's OpenBao configuration
+  ansible.builtin.template:
+    src: openbao.hcl.j2
+    dest: "{{ vault_baseline_openbao_config_path }}"
+    owner: root
+    group: openbao
+    mode: '0640'
+  register: vault_baseline_openbao_config
+  when: not vault_baseline_openbao_dry_install | bool
+
+# Starts a stopped service but never restarts a running one: under Shamir a restart
+# seals the node until someone unseals it by hand.
+- name: Enable and start OpenBao
+  ansible.builtin.systemd_service:
+    name: openbao
+    enabled: true
+    state: started
+  register: vault_baseline_openbao_service
+  when:
+    - vault_baseline_openbao_enabled | bool
+    - not vault_baseline_openbao_dry_install | bool
+
+- name: Warn that a running node still has the old configuration
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }}: openbao.hcl changed while OpenBao was running. Restart it
+      by hand (`sudo systemctl restart openbao`), then unseal it; it stays sealed until then.
+  when:
+    - vault_baseline_openbao_enabled | bool
+    - vault_baseline_openbao_config is changed
+    - vault_baseline_openbao_service is not changed
