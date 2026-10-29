@@ -28,3 +28,6 @@ vault_baseline_openbao_data_dir: /opt/openbao/data
 # still false, then sets it true to start the service; until then a run stops a service
 # someone started by hand.
 vault_baseline_openbao_enabled: false
+# HOMELAB-34. Each node writes its own copy of the cluster-wide file audit device.
+vault_baseline_openbao_audit_dir: /opt/openbao/audit
+vault_baseline_openbao_audit_rotate: 14
