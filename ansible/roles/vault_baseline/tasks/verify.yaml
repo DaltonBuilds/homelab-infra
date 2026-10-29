@@ -1,5 +1,5 @@
 ---
-# Read-only acceptance checks for HOMELAB-26/27. vault-baseline.yaml runs them after each
+# Read-only acceptance checks for HOMELAB-26/27/30. vault-baseline.yaml runs them after each
 # node; vault-verify.yaml runs them on demand.
 - name: Read node state
   ansible.builtin.command: "{{ item.value }}"
@@ -24,7 +24,9 @@
       bao_enabled: /usr/bin/systemctl is-enabled openbao
       bao_active: /usr/bin/systemctl is-active openbao
       listeners: /usr/bin/ss -Htln
-      bao_data: /usr/bin/find /opt/openbao/data -mindepth 1 -print -quit
+      bao_data: /usr/bin/find {{ vault_baseline_openbao_data_dir }} -mindepth 1 -print -quit
+      bao_perms: /usr/bin/stat -c '%n %U:%G %a' {{ vault_baseline_openbao_config_path }} {{ vault_baseline_openbao_data_dir }}
+      bao_config: /usr/bin/grep -cE '^ +node_id += "{{ inventory_hostname }}"$|^disable_mlock' {{ vault_baseline_openbao_config_path }}
 
 - name: Index node state by name
   ansible.builtin.set_fact:
@@ -97,6 +99,33 @@
   vars:
     st: "{{ vault_baseline_state_by_name }}"
   when: not vault_baseline_openbao_enabled | bool
+
+# HOMELAB-30. The grep must find this node's node_id and no disable_mlock, which OpenBao 2.x flags as unknown.
+- name: Verify the OpenBao configuration and data directory
+  ansible.builtin.assert:
+    that:
+      - st.bao_perms.stdout_lines == [vault_baseline_openbao_config_path ~ ' root:openbao 640', vault_baseline_openbao_data_dir ~ ' openbao:openbao 750']
+      - st.bao_config.stdout | trim == '1'
+    fail_msg: >-
+      OpenBao config or data directory on {{ inventory_hostname }} differs: {{ st.bao_perms.stdout_lines }},
+      {{ st.bao_config.stdout | trim }} matching lines (expected only node_id). Run vault-baseline.yaml.
+  vars:
+    st: "{{ vault_baseline_state_by_name }}"
+
+# A sealed node serves the API; it listens on the cluster port only once unsealed.
+- name: Verify OpenBao is enabled, running and serving the API
+  ansible.builtin.assert:
+    that:
+      - st.bao_enabled.stdout | trim == 'enabled'
+      - st.bao_active.stdout | trim == 'active'
+      - st.listeners.stdout_lines | select('search', ':' ~ vault_baseline_api_port ~ '\s') | list != []
+    fail_msg: >-
+      OpenBao on {{ inventory_hostname }} is {{ st.bao_enabled.stdout | trim }}/{{ st.bao_active.stdout | trim }}
+      with API listeners {{ st.listeners.stdout_lines | select('search', ':' ~ vault_baseline_api_port ~ '\s') | list }}.
+      Check `journalctl -u openbao`.
+  vars:
+    st: "{{ vault_baseline_state_by_name }}"
+  when: vault_baseline_openbao_enabled | bool
 
 - name: Note this node's results for the cross-node comparison
   ansible.builtin.set_fact:
