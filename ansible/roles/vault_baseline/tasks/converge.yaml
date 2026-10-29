@@ -4,3 +4,6 @@
 
 - name: Install the pinned OpenBao package
   ansible.builtin.import_tasks: openbao.yaml
+
+- name: Prepare the audit log directory and its rotation
+  ansible.builtin.import_tasks: audit.yaml

@@ -1,6 +1,7 @@
 ---
-# HOMELAB-26/27/30: harden the OpenBao VMs, install the pinned OpenBao package and write
-# its config. The service starts only once vault_baseline_openbao_enabled is true.
+# HOMELAB-26/27/30/34: harden the OpenBao VMs, install the pinned OpenBao package, write
+# its config and prepare audit logging. The service starts only once
+# vault_baseline_openbao_enabled is true.
 # Run vault-vm.yaml first. One node at a time: --limit vault-03 first.
 - name: Harden the OpenBao VMs and install OpenBao, one node at a time
   hosts: vault

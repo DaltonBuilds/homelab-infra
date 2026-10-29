@@ -1,0 +1,40 @@
+---
+# HOMELAB-34. Ansible prepares the audit destination and its rotation. Enabling the
+# device (`bao audit enable file ...`) needs a token, so it stays a manual step after init.
+- name: Create the audit log directory
+  ansible.builtin.file:
+    path: "{{ vault_baseline_openbao_audit_dir }}"
+    state: directory
+    owner: openbao
+    group: openbao
+    mode: '0750'
+
+- name: Install logrotate
+  ansible.builtin.apt:
+    name: logrotate
+    cache_valid_time: 3600
+
+# The unit's ExecReload sends SIGHUP to the main process only, and SIGHUP makes the file
+# audit device reopen its log. With one audit device, OpenBao blocks every request it
+# cannot audit, so a failed reopen shows up as API errors.
+- name: Rotate the audit log daily
+  ansible.builtin.copy:
+    content: |
+      # Managed by homelab-infra vault_baseline (HOMELAB-34).
+      {{ vault_baseline_openbao_audit_dir }}/audit.log {
+        daily
+        rotate {{ vault_baseline_openbao_audit_rotate }}
+        compress
+        delaycompress
+        missingok
+        notifempty
+        create 0600 openbao openbao
+        postrotate
+          if /usr/bin/systemctl is-active --quiet openbao; then /usr/bin/systemctl reload openbao; fi
+        endscript
+      }
+    dest: /etc/logrotate.d/openbao-audit
+    owner: root
+    group: root
+    mode: '0644'
+    validate: /usr/sbin/logrotate --debug %s
