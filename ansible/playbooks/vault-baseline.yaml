@@ -1,0 +1,24 @@
+---
+# HOMELAB-26/27: harden the OpenBao VMs and install the pinned, stopped OpenBao package.
+# Run vault-vm.yaml first. One node at a time: --limit vault-03 first.
+- name: Harden the OpenBao VMs and install OpenBao, one node at a time
+  hosts: vault
+  gather_facts: false
+  serial: 1
+  any_errors_fatal: true
+  become: true
+  tasks:
+    - name: Apply the baseline
+      ansible.builtin.import_role:
+        name: vault_baseline
+        tasks_from: converge
+
+    - name: Reload ssh before verifying it
+      ansible.builtin.meta: flush_handlers
+
+    # Check mode predicts changes it did not make, so post-change assertions would fail.
+    - name: Verify the node before moving to the next one
+      ansible.builtin.include_role:
+        name: vault_baseline
+        tasks_from: verify
+      when: not ansible_check_mode

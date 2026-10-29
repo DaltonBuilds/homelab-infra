@@ -1,0 +1,52 @@
+---
+# Read-only. The guest agent, host key and SSH checks; vault-vm.yaml runs them after
+# bootstrap and vault-verify.yaml on demand.
+- name: Require the guest agent to answer the PVE node
+  ansible.builtin.command: /usr/sbin/qm agent {{ vault_vm_vmid }} ping
+  register: vault_vm_agent_ping
+  changed_when: false
+  check_mode: false
+  retries: 12
+  delay: 5
+  until: vault_vm_agent_ping.rc == 0
+  delegate_to: "{{ vault_vm_pve_node }}"
+  when: not ansible_check_mode
+
+# The first SSH connection trusted an unseen key (accept-new). Reading the key through
+# the guest agent, over the verified SSH session to the PVE node, confirms it.
+- name: Read the VM's SSH host key through the guest agent
+  ansible.builtin.command: /usr/sbin/qm guest exec {{ vault_vm_vmid }} -- /bin/cat /etc/ssh/ssh_host_ed25519_key.pub
+  register: vault_vm_agent_host_key
+  changed_when: false
+  check_mode: false
+  delegate_to: "{{ vault_vm_pve_node }}"
+  when: not ansible_check_mode
+
+- name: Read the host key the workstation trusts
+  ansible.builtin.command: /usr/bin/ssh-keygen -F {{ ansible_host }}
+  register: vault_vm_known_host_key
+  changed_when: false
+  check_mode: false
+  delegate_to: localhost
+  when: not ansible_check_mode
+
+- name: Require the trusted host key to be the VM's own
+  ansible.builtin.assert:
+    that:
+      - (vault_vm_agent_host_key.stdout | from_json)['out-data'].split()[1] in vault_vm_known_host_key.stdout
+    fail_msg: The workstation's known_hosts key for {{ ansible_host }} is not the key inside VM {{ vault_vm_vmid }}. Remove it and investigate before trusting this VM.
+  when: not ansible_check_mode
+
+- name: Read the effective SSH server settings
+  ansible.builtin.command: /usr/sbin/sshd -T
+  register: vault_vm_sshd
+  changed_when: false
+  check_mode: false
+  become: true
+
+- name: Require key-only SSH
+  ansible.builtin.assert:
+    that:
+      - vault_vm_sshd.stdout is search('(?m)^passwordauthentication no$')
+      - vault_vm_sshd.stdout is search('(?m)^kbdinteractiveauthentication no$')
+    fail_msg: SSH still accepts passwords on {{ inventory_hostname }}.

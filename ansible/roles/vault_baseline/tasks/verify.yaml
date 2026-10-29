@@ -1,0 +1,114 @@
+---
+# Read-only acceptance checks for HOMELAB-26/27. vault-baseline.yaml runs them after each
+# node; vault-verify.yaml runs them on demand.
+- name: Read node state
+  ansible.builtin.command: "{{ item.value }}"
+  loop: "{{ commands | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  register: vault_baseline_state
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  vars:
+    commands:
+      swap: /usr/sbin/swapon --noheadings --show=NAME
+      sshd: /usr/sbin/sshd -T
+      time: /usr/bin/timedatectl show
+      chrony: /usr/bin/chronyc -n tracking
+      ufw: /usr/sbin/ufw status verbose
+      bao: /usr/bin/bao version
+      bao_user: /usr/bin/getent passwd openbao
+      bao_group: /usr/bin/getent group openbao
+      bao_selection: /usr/bin/dpkg --get-selections openbao
+      bao_enabled: /usr/bin/systemctl is-enabled openbao
+      bao_active: /usr/bin/systemctl is-active openbao
+      listeners: /usr/bin/ss -Htln
+      bao_data: /usr/bin/find /opt/openbao/data -mindepth 1 -print -quit
+
+- name: Index node state by name
+  ansible.builtin.set_fact:
+    vault_baseline_state_by_name: "{{ dict(vault_baseline_state.results | map(attribute='item.key') | zip(vault_baseline_state.results)) }}"
+
+- name: Note the clock offset
+  ansible.builtin.set_fact:
+    # chronyc reports "System time : 0.000012345 seconds fast|slow of NTP time".
+    vault_baseline_clock_offset_ms: "{{ (s.stdout | regex_search('System time\\s*:\\s*([0-9.]+) seconds', '\\1') | first | float * 1000) | round(3) }}"
+  vars:
+    s: "{{ vault_baseline_state_by_name.chrony }}"
+
+- name: Verify swap, SSH and time
+  ansible.builtin.assert:
+    that:
+      - st.swap.rc == 0 and st.swap.stdout | trim == ''
+      - st.sshd.stdout is search('(?m)^permitrootlogin no$')
+      - st.sshd.stdout is search('(?m)^passwordauthentication no$')
+      - st.sshd.stdout is search('(?m)^kbdinteractiveauthentication no$')
+      - st.time.stdout is search('(?m)^Timezone=' ~ (vault_baseline_timezone | regex_escape) ~ '$')
+      - st.time.stdout is search('(?m)^NTPSynchronized=yes$')
+      - st.chrony.stdout is search('(?m)^Leap status\s*:\s*Normal$')
+      - vault_baseline_clock_offset_ms | float < vault_baseline_max_clock_offset_ms
+    fail_msg: >-
+      Swap, SSH or time differs from the baseline on {{ inventory_hostname }}
+      (clock offset {{ vault_baseline_clock_offset_ms }} ms).
+  vars:
+    st: "{{ vault_baseline_state_by_name }}"
+
+# One line per expected rule, as `ufw status verbose` prints it, and nothing else allowed.
+- name: Verify the firewall
+  ansible.builtin.assert:
+    that:
+      - "ufw.stdout is search('(?m)^Status: active$')"
+      - "ufw.stdout is search('(?m)^Default: deny \\(incoming\\), allow \\(outgoing\\)')"
+      - expected | reject('in', ufw.stdout_lines | map('regex_replace', '\s+', ' ') | map('trim') | list) | list == []
+      - ufw.stdout_lines | select('search', 'ALLOW IN') | list | length == expected | length
+    fail_msg: >-
+      Firewall on {{ inventory_hostname }} differs. Missing:
+      {{ expected | reject('in', ufw.stdout_lines | map('regex_replace', '\s+', ' ') | map('trim') | list) | list }}.
+      Review `sudo ufw status verbose`.
+  vars:
+    ufw: "{{ vault_baseline_state_by_name.ufw }}"
+    expected: >-
+      {{ (vault_baseline_ssh_sources | map('regex_replace', '^(.*)$', '22/tcp ALLOW IN \1 # ssh') | list)
+       + (vault_baseline_api_sources | map('regex_replace', '^(.*)$', vault_baseline_api_port ~ '/tcp ALLOW IN \1 # openbao-api') | list)
+       + (vault_baseline_cluster_peers | map('regex_replace', '^(.*)$', vault_baseline_cluster_port ~ '/tcp ALLOW IN \1 # openbao-raft') | list) }}
+
+- name: Verify the OpenBao package
+  ansible.builtin.assert:
+    that:
+      - st.bao.rc == 0
+      - st.bao.stdout is search('^OpenBao v' ~ (vault_baseline_openbao_version | regex_escape) ~ '\s')
+      - st.bao_user.rc == 0 and st.bao_group.rc == 0
+      - st.bao_selection.stdout is search('^openbao\s+hold$')
+    fail_msg: OpenBao on {{ inventory_hostname }} is not the held {{ vault_baseline_openbao_version }} package.
+  vars:
+    st: "{{ vault_baseline_state_by_name }}"
+
+- name: Verify OpenBao is stopped, disabled and holds no data
+  ansible.builtin.assert:
+    that:
+      - st.bao_enabled.stdout | trim == 'disabled'
+      - st.bao_active.stdout | trim == 'inactive'
+      - st.listeners.stdout_lines | select('search', ':(' ~ vault_baseline_api_port ~ '|' ~ vault_baseline_cluster_port ~ ')\s') | list == []
+      - st.bao_data.stdout | trim == ''
+    fail_msg: >-
+      OpenBao on {{ inventory_hostname }} is {{ st.bao_enabled.stdout | trim }}/{{ st.bao_active.stdout | trim }},
+      listeners {{ st.listeners.stdout_lines | select('search', ':(' ~ vault_baseline_api_port ~ '|' ~ vault_baseline_cluster_port ~ ')\s') | list }}, data [{{ st.bao_data.stdout | trim }}]. Phase 0.4 leaves it off and empty.
+  vars:
+    st: "{{ vault_baseline_state_by_name }}"
+  when: not vault_baseline_openbao_enabled | bool
+
+- name: Note this node's results for the cross-node comparison
+  ansible.builtin.set_fact:
+    vault_baseline_summary:
+      node: "{{ inventory_hostname }}"
+      host: "{{ vault_vm_pve_node | default('') }}"
+      vmid: "{{ vault_vm_vmid | default('') }}"
+      address: "{{ ansible_host }}"
+      bao: "{{ st.bao.stdout | regex_search('v[0-9][^ ]*') }}"
+      held: "{{ st.bao_selection.stdout is search('hold') }}"
+      service: "{{ st.bao_enabled.stdout | trim }}/{{ st.bao_active.stdout | trim }}"
+      clock_offset_ms: "{{ vault_baseline_clock_offset_ms }}"
+      firewall_rules: "{{ st.ufw.stdout_lines | select('search', 'ALLOW IN') | list | length }}"
+  vars:
+    st: "{{ vault_baseline_state_by_name }}"

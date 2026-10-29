@@ -16,7 +16,7 @@ homelab-infra/
 │   ├── ansible.cfg
 │   ├── requirements.yml             # pinned collections (vyos.vyos, ansible.netcommon)
 │   ├── inventories/homelab/         # hosts, group_vars, host_vars
-│   ├── playbooks/                   # pve-*, ts-router*, ts-exit-node*, vyos-router*, vault-vm
+│   ├── playbooks/                   # pve-*, ts-router*, ts-exit-node*, vyos-router*, vault-*
 │   └── roles/
 │       ├── pve_baseline/            # fleet APT, time, local storage content, notification checks and verification
 │       ├── pve_update/              # gated one-host-at-a-time upgrade and reboot
@@ -24,12 +24,13 @@ homelab-infra/
 │       ├── pve_gpu/                 # pve-07 GPU inspect, preflight, configure, verify
 │       ├── ts_router/               # Tailscale subnet router container on pve-03
 │       ├── vyos_router/             # VyOS VRRP next hop and BGP on bgp-01/bgp-02
-│       └── vault_vm/                # OpenBao VMs vault-01/02/03: create, check, bootstrap
+│       ├── vault_vm/                # OpenBao VMs vault-01/02/03: create, check, bootstrap
+│       └── vault_baseline/          # OpenBao VM hardening, firewall and pinned OpenBao package
 ├── tailscale/policy.hujson          # tailnet policy, applied by GitHub Actions
 └── .github/workflows/               # tailscale-policy: test on PR, apply on merge
 ```
 
-From the repo root, `mise install` installs the pinned Ansible CLI. `mise.toml` points `ANSIBLE_CONFIG` at `ansible/ansible.cfg`. Galaxy collections install under `ansible/collections/`, which Git ignores: run `mise exec -- ansible-galaxy collection install -r ansible/requirements.yml`. Only `vyos_router` uses them; the other roles use only `ansible.builtin`. Shared values live in `inventories/homelab/group_vars/pve.yaml`; per-host differences live in `host_vars/`. See [Ansible structure](docs/ansible-structure.md) for a diagram of how the pieces connect.
+From the repo root, `mise install` installs the pinned Ansible CLI. `mise.toml` points `ANSIBLE_CONFIG` at `ansible/ansible.cfg`. Galaxy collections install under `ansible/collections/`, which Git ignores: run `mise exec -- ansible-galaxy collection install -r ansible/requirements.yml`. Only `vyos_router` (vyos.vyos, netcommon) and `vault_baseline` (community.general `ufw` and `timezone`) use them; the other roles use only `ansible.builtin`. Shared values live in `inventories/homelab/group_vars/pve.yaml`; per-host differences live in `host_vars/`. See [Ansible structure](docs/ansible-structure.md) for a diagram of how the pieces connect.
 
 `mise run lint` checks that every YAML file starts with `---`. Install the same check as a Git hook with `mise exec -- pre-commit install`.
 
@@ -248,6 +249,40 @@ One node at a time; vault-01 last, because pve-01 also runs bgp-01. Each run:
 **Access.** The tailnet policy does not route `.20`–`.22`, so these VMs are reachable from the LAN only.
 
 **Rebuild.** For a node that holds no data yet: `qm destroy <id> --purge 1` on its PVE node, `ssh-keygen -R <address>` on the workstation, then run the play. After Phase 0.5 a node holds Raft data; rebuild it only through the OpenBao recovery procedure.
+
+### Hardening and OpenBao package
+
+```sh
+mise exec -- ansible-playbook ansible/playbooks/vault-baseline.yaml --check --diff --limit vault-03
+mise exec -- ansible-playbook ansible/playbooks/vault-baseline.yaml --diff
+mise exec -- ansible-playbook ansible/playbooks/vault-verify.yaml
+```
+
+`vault-baseline.yaml` runs one node at a time and stops on the first failure ([HOMELAB-26](https://daltonbuilds.youtrack.cloud/issue/HOMELAB-26), [HOMELAB-27](https://daltonbuilds.youtrack.cloud/issue/HOMELAB-27)). On each node it:
+
+1. keeps swap off, now and in `/etc/fstab`;
+2. writes `/etc/ssh/sshd_config.d/10-homelab-hardening.conf` (`PermitRootLogin no`, password and keyboard-interactive logins off), checks it with `sshd -t`, and reloads `ssh`;
+3. sets `America/Denver` and keeps chrony running;
+4. adds the UFW rules before enabling the firewall, so the play's own SSH session stays allowed. The rules: SSH from VLANs 40 and 10; API 8200 from VLANs 40, 10, 50 and 60; Raft 8201 from `.20`, `.21` and `.22` only, one rule each. Inbound default deny, outbound allow;
+5. downloads `openbao_<version>_linux_amd64.deb`, checks it against `vault_baseline_openbao_sha256`, installs it, holds it with `dpkg --set-selections`, and keeps `openbao` stopped and disabled.
+
+Then it runs `vault_baseline/tasks/verify.yaml` on that node. That checks: no swap; effective `sshd -T`; timezone and chrony sync with an offset under 300 ms; exactly the nine rules and default policies; the held pinned version and the `openbao` user and group; and that the service is disabled and inactive, nothing listens on 8200/8201, and `/opt/openbao/data` is empty.
+
+`vault-verify.yaml` changes nothing ([HOMELAB-28](https://daltonbuilds.youtrack.cloud/issue/HOMELAB-28)). It runs the `vault_vm` placement, configuration, agent and host-key checks and the baseline verify on all three nodes. It then requires one OpenBao version and one PVE host per node, and prints a per-node summary.
+
+**Pinning a new OpenBao release.** Stay within 2.6.x until the seal-plugin migration spike clears 2.7 (ADR-006). Verify the release's `checksums.txt` with its Sigstore bundle, then set `vault_baseline_openbao_version` and `vault_baseline_openbao_sha256` in `group_vars/vault.yaml`:
+
+```sh
+gh release download v2.6.5 -R openbao/openbao -p checksums.txt -p checksums.txt.sigstore.json
+cosign verify-blob --bundle checksums.txt.sigstore.json \
+  --certificate-identity-regexp '^https://github\.com/openbao/openbao/\.github/workflows/' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com checksums.txt
+grep ' openbao_2.6.5_linux_amd64.deb$' checksums.txt
+```
+
+The role releases the hold, installs the new package and holds it again. Upgrading a running cluster is a Phase 0.5+ maintenance procedure, one node at a time; this play does not sequence that.
+
+**What the package does.** Its `postinst` creates the `openbao` system user, a self-signed TLS key and certificate in `/opt/openbao/tls`, and an empty `/opt/openbao/data`. It does not enable or start the service. The unit's capability bounding set is `CAP_SYSLOG` only, so OpenBao cannot `mlock`. `MemorySwapMax=0` and the no-swap rule stand in for it, and Phase 0.5's `openbao.hcl` needs `disable_mlock = true`. Phase 0.5 sets `vault_baseline_openbao_enabled: true`; until then a run stops a service started by hand.
 
 **Lifecycle.** At Tier 1 [1.3], import the three VMs into OpenTofu state; never recreate them. Then tag the last commit that contains `create.yaml`, delete that file and its include, and replace this section's create step with a pointer to the tag. Only one tool owns the VMs at any time.
 

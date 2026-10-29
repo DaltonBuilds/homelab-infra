@@ -26,6 +26,8 @@ flowchart LR
     vyr["vyos-router.yaml<br/>configure, one router at a time"]
     vyrver["vyos-router-verify.yaml<br/>read-only checks"]
     vvm["vault-vm.yaml<br/>create and bootstrap, one VM at a time"]
+    vbl["vault-baseline.yaml<br/>harden, install OpenBao, one node at a time"]
+    vver2["vault-verify.yaml<br/>read-only checks"]
   end
 
   subgraph rb["roles/pve_baseline"]
@@ -81,7 +83,16 @@ flowchart LR
     vmchk["checks.yaml<br/>read-only, runs on PVE host"]
     vmcre["create.yaml<br/>only when missing"]
     vmboot["bootstrap.yaml"]
+    vmver["verify.yaml<br/>agent, host key, SSH"]
     vmtpl[/"templates/network.yaml.j2<br/>templates/vendor.yaml.j2"/]
+  end
+
+  subgraph rvb["roles/vault_baseline"]
+    vbconv["converge.yaml"]
+    vbhard["hardening.yaml<br/>swap, sshd, time, ufw"]
+    vbbao["openbao.yaml<br/>pinned, held, stopped"]
+    vbver["verify.yaml"]
+    vbhand{{"handlers: reload ssh"}}
   end
 
   inv -.-> pb
@@ -129,7 +140,15 @@ flowchart LR
   vvm --> vmchk
   vvm -->|"VM missing"| vmcre --> vmtpl
   vvm -->|"after create"| vmchk
-  vvm --> vmboot
+  vvm --> vmboot --> vmver
+
+  vbl --> vbconv --> vbhard
+  vbconv --> vbbao
+  vbhard -.->|"notify on change"| vbhand
+  vbl -->|"after each node"| vbver
+  vver2 --> vmchk
+  vver2 --> vmver
+  vver2 --> vbver
 
   gconf --> ginsp --> gpy
   gconf --> gpre
@@ -141,11 +160,11 @@ flowchart LR
 
 ## Reading the diagram
 
-Solid arrows mean "runs". The dashed arrow from the inventory means every playbook reads its variables from there. The dashed arrow to the handler means it runs only when a task reports a change.
+Solid arrows mean "runs". The dashed arrow from the inventory means every playbook reads its variables from there. The dashed arrows to handlers mean they run only when a task reports a change.
 
 - **Inventory** says which hosts exist and holds their values. `group_vars/pve.yaml` applies to every host; `host_vars/<host>.yaml` overrides or adds values for one host. Role `defaults/main.yaml` files hold the lowest-priority values and are not drawn.
 - **Playbooks** are what you run. Each one picks a role's entry task file with `tasks_from`.
 - **Roles** group the work. Entry task files such as `converge.yaml` pull in smaller task files. Those use the role's `files/` (scripts piped to the host's Python, never installed) and `templates/` (files rendered with inventory values).
 - **Shared checks.** `pve_baseline/verify.yaml` is the acceptance check for every host. `pve-verify.yaml` runs it on demand, and `pve-baseline.yaml` and `pve-update.yaml` run it after each host before moving on. `pve_update` and `pve_network` reuse the baseline preflight, so updates and network changes require the same identity and full-quorum checks as configuration changes. `pve_network/verify.yaml` is the network acceptance check; `pve-verify.yaml` and `pve-network.yaml` run it, and it compares the live file with the template so UI edits show up as drift.
 
-Only `pve-baseline.yaml`, `pve-update.yaml`, `pve-network.yaml`, `pve-gpu-configure.yaml`, `ts-router.yaml`, `vyos-router.yaml` and `vault-vm.yaml` change hosts. `ts-router.yaml` creates one container on pve-03 and configures it; it does not change the PVE host's own configuration. `vyos-router.yaml` changes only the two router guests. `vault-vm.yaml` creates a missing OpenBao VM on its PVE host and bootstraps it; it never changes an existing VM's configuration. `pve-update.yaml`, `pve-network.yaml` and `pve-gpu-configure.yaml` also require a confirmation variable for a real run.
+Only `pve-baseline.yaml`, `pve-update.yaml`, `pve-network.yaml`, `pve-gpu-configure.yaml`, `ts-router.yaml`, `vyos-router.yaml`, `vault-vm.yaml` and `vault-baseline.yaml` change hosts. `ts-router.yaml` creates one container on pve-03 and configures it; it does not change the PVE host's own configuration. `vyos-router.yaml` changes only the two router guests. `vault-vm.yaml` creates a missing OpenBao VM on its PVE host and bootstraps it; it never changes an existing VM's configuration. `vault-baseline.yaml` changes only the three vault guests. `pve-update.yaml`, `pve-network.yaml` and `pve-gpu-configure.yaml` also require a confirmation variable for a real run.

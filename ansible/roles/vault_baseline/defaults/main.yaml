@@ -1,0 +1,25 @@
+---
+vault_baseline_timezone: America/Denver
+# Largest chrony offset verify accepts after the clock settles (HOMELAB-26).
+vault_baseline_max_clock_offset_ms: 300
+
+# Phase 0.4b access matrix. SSH: management VLAN 40 and the workstation VLAN 10.
+vault_baseline_ssh_sources:
+  - 192.168.40.0/24
+  - 192.168.10.0/24
+# API: management, workstation, homelab-prod and homelab-dev.
+vault_baseline_api_port: 8200
+vault_baseline_api_sources:
+  - 192.168.40.0/24
+  - 192.168.10.0/24
+  - 192.168.50.0/24
+  - 192.168.60.0/24
+# Raft: only the three nodes, one rule each.
+vault_baseline_cluster_port: 8201
+vault_baseline_cluster_peers: "{{ groups['vault'] | map('extract', hostvars, 'ansible_host') | sort }}"
+
+vault_baseline_openbao_url: https://github.com/openbao/openbao/releases/download/v{{ vault_baseline_openbao_version }}/openbao_{{ vault_baseline_openbao_version }}_linux_amd64.deb
+vault_baseline_openbao_package_path: /var/cache/homelab/openbao_{{ vault_baseline_openbao_version }}_linux_amd64.deb
+# Phase 0.4 installs OpenBao stopped and disabled. Phase 0.5 writes the config and sets
+# this true; until then a run stops a service someone started by hand.
+vault_baseline_openbao_enabled: false
