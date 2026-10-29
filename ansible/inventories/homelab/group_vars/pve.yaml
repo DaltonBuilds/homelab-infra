@@ -30,5 +30,12 @@ pve_network_bridge_vlan_aware: true
 pve_baseline_storage_active:
   - local
   - local-lvm
+# Cluster-wide. snippets added for per-VM cloud-init files (HOMELAB-22, 2026-10-28).
+pve_baseline_local_storage_content:
+  - backup
+  - import
+  - iso
+  - snippets
+  - vztmpl
 
 pve_baseline_notification_target: mail-to-root

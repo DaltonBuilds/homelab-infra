@@ -1,0 +1,21 @@
+---
+# Storage definitions live in /etc/pve/storage.cfg and are shared by the whole cluster.
+# This sets which content types `local` accepts; it never adds, moves or resizes storage.
+- name: Read the local storage definition
+  ansible.builtin.command: /usr/bin/pvesh get /storage/local --output-format json
+  register: pve_baseline_local_storage
+  changed_when: false
+  check_mode: false
+
+# snippets holds per-VM cloud-init files (HOMELAB-22); the rest were already enabled.
+- name: Set the content types local storage accepts
+  ansible.builtin.command:
+    argv:
+      - /usr/sbin/pvesm
+      - set
+      - local
+      - --content
+      - "{{ pve_baseline_local_storage_content | join(',') }}"
+  when:
+    - (pve_baseline_local_storage.stdout | from_json).content.split(',') | sort != pve_baseline_local_storage_content | sort
+    - inventory_hostname == ansible_play_hosts_all | first

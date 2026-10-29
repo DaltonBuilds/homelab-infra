@@ -1,0 +1,101 @@
+---
+# Runs over SSH as the admin user. Hardening and OpenBao belong to vault_baseline.
+- name: Wait for cloud-init to finish
+  ansible.builtin.command: /usr/bin/cloud-init status --wait
+  register: vault_vm_cloud_init
+  changed_when: false
+  # 2 is "done with recoverable errors", usually deprecated keys; the output says which.
+  failed_when: vault_vm_cloud_init.rc not in [0, 2]
+
+- name: Gather facts from the VM
+  ansible.builtin.setup:
+
+- name: Require the planned OS, hostname and address
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.distribution == 'Ubuntu'
+      - ansible_facts.distribution_version is version('26.04', '>=')
+      - ansible_facts.distribution_major_version == '26'
+      - ansible_facts.hostname == vault_vm_hostname
+      - ansible_host in ansible_facts.all_ipv4_addresses
+    fail_msg: >-
+      Got {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }},
+      hostname {{ ansible_facts.hostname }}, addresses {{ ansible_facts.all_ipv4_addresses }}.
+
+- name: Apply OS updates
+  ansible.builtin.apt:
+    update_cache: true
+    upgrade: dist
+  become: true
+  when: vault_vm_created | default(false) or vault_vm_upgrade | bool
+
+- name: Install the QEMU guest agent
+  ansible.builtin.apt:
+    name: qemu-guest-agent
+    update_cache: true
+    cache_valid_time: 3600
+  become: true
+
+# The unit is static: udev starts it when the virtio port appears, so it cannot be enabled.
+- name: Start the QEMU guest agent
+  ansible.builtin.systemd_service:
+    name: qemu-guest-agent
+    state: started
+  become: true
+
+# Proves updates, hostname, network and the agent all survive a boot.
+- name: Reboot after updates
+  ansible.builtin.reboot:
+    reboot_timeout: 600
+  become: true
+  when: vault_vm_created | default(false) or vault_vm_upgrade | bool
+
+- name: Require the guest agent to answer the PVE node
+  ansible.builtin.command: /usr/sbin/qm agent {{ vault_vm_vmid }} ping
+  register: vault_vm_agent_ping
+  changed_when: false
+  check_mode: false
+  retries: 12
+  delay: 5
+  until: vault_vm_agent_ping.rc == 0
+  delegate_to: "{{ vault_vm_pve_node }}"
+  when: not ansible_check_mode
+
+# The first SSH connection trusted an unseen key (accept-new). Reading the key through
+# the guest agent, over the verified SSH session to the PVE node, confirms it.
+- name: Read the VM's SSH host key through the guest agent
+  ansible.builtin.command: /usr/sbin/qm guest exec {{ vault_vm_vmid }} -- /bin/cat /etc/ssh/ssh_host_ed25519_key.pub
+  register: vault_vm_agent_host_key
+  changed_when: false
+  check_mode: false
+  delegate_to: "{{ vault_vm_pve_node }}"
+  when: not ansible_check_mode
+
+- name: Read the host key the workstation trusts
+  ansible.builtin.command: /usr/bin/ssh-keygen -F {{ ansible_host }}
+  register: vault_vm_known_host_key
+  changed_when: false
+  check_mode: false
+  delegate_to: localhost
+  when: not ansible_check_mode
+
+- name: Require the trusted host key to be the VM's own
+  ansible.builtin.assert:
+    that:
+      - (vault_vm_agent_host_key.stdout | from_json)['out-data'].split()[1] in vault_vm_known_host_key.stdout
+    fail_msg: The workstation's known_hosts key for {{ ansible_host }} is not the key inside VM {{ vault_vm_vmid }}. Remove it and investigate before trusting this VM.
+  when: not ansible_check_mode
+
+- name: Read the effective SSH server settings
+  ansible.builtin.command: /usr/sbin/sshd -T
+  register: vault_vm_sshd
+  changed_when: false
+  check_mode: false
+  become: true
+
+- name: Require key-only SSH
+  ansible.builtin.assert:
+    that:
+      - vault_vm_sshd.stdout is search('(?m)^passwordauthentication no$')
+      - vault_vm_sshd.stdout is search('(?m)^kbdinteractiveauthentication no$')
+    fail_msg: SSH still accepts passwords on {{ inventory_hostname }}.

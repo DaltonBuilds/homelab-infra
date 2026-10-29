@@ -86,6 +86,18 @@
   vars:
     storage: "{{ pve_baseline_state_by_name.storage }}"
 
+- name: Read the local storage definition
+  ansible.builtin.command: /usr/bin/pvesh get /storage/local --output-format json
+  register: pve_baseline_verify_local_storage
+  changed_when: false
+  check_mode: false
+
+- name: Verify local storage content types
+  ansible.builtin.assert:
+    that:
+      - (pve_baseline_verify_local_storage.stdout | from_json).content.split(',') | sort == pve_baseline_local_storage_content | sort
+    fail_msg: Storage local accepts {{ (pve_baseline_verify_local_storage.stdout | from_json).content }}, not {{ pve_baseline_local_storage_content | join(',') }}.
+
 - name: Verify the management bridge
   ansible.builtin.assert:
     that:

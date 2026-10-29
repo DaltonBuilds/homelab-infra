@@ -13,3 +13,6 @@
 
 - name: Check notification configuration
   ansible.builtin.import_tasks: notifications.yaml
+
+- name: Converge local storage content types
+  ansible.builtin.import_tasks: storage.yaml

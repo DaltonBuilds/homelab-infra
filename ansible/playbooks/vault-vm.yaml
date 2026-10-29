@@ -1,0 +1,40 @@
+---
+# HOMELAB-22: create the OpenBao VMs on their PVE nodes, then bring each one to a
+# patched, reachable state. One node at a time: --limit vault-03 first.
+- name: Create or check the OpenBao VMs
+  hosts: vault
+  gather_facts: false
+  tasks:
+    - name: Check the VM against inventory
+      ansible.builtin.import_role:
+        name: vault_vm
+        tasks_from: checks
+
+    - name: Create the VM
+      ansible.builtin.include_role:
+        name: vault_vm
+        tasks_from: create
+      when: vault_vm_guest == {}
+
+    - name: Check the new VM against inventory
+      ansible.builtin.include_role:
+        name: vault_vm
+        tasks_from: checks
+      when: vault_vm_created | default(false) and not ansible_check_mode
+
+- name: Bootstrap the OpenBao VMs
+  hosts: vault
+  gather_facts: false
+  tasks:
+    - name: Stop here in check mode when the VM does not exist yet
+      ansible.builtin.meta: end_host
+      when: ansible_check_mode and vault_vm_guest == {}
+
+    - name: Wait for SSH
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+
+    - name: Bootstrap
+      ansible.builtin.import_role:
+        name: vault_vm
+        tasks_from: bootstrap

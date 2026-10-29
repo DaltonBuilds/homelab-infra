@@ -10,6 +10,8 @@ flowchart LR
     hv["host_vars/pve-0N.yaml<br/>bridge VLANs, unused NICs;<br/>pve-07: GPU IDs, ARC, local-zfs"]
     gvv["group_vars/vyos.yaml<br/>VRRP VIP, BGP, LB prefixes"]
     hvv["host_vars/bgp-0N.yaml<br/>VRRP priority"]
+    gvb["group_vars/vault.yaml<br/>image pin, VM spec, network"]
+    hvb["host_vars/vault-0N.yaml<br/>PVE host, guest ID"]
   end
 
   subgraph pb["Playbooks: what you run"]
@@ -23,6 +25,7 @@ flowchart LR
     tsrver["ts-router-verify.yaml<br/>read-only checks"]
     vyr["vyos-router.yaml<br/>configure, one router at a time"]
     vyrver["vyos-router-verify.yaml<br/>read-only checks"]
+    vvm["vault-vm.yaml<br/>create and bootstrap, one VM at a time"]
   end
 
   subgraph rb["roles/pve_baseline"]
@@ -34,6 +37,7 @@ flowchart LR
     nag["subscription_reminder.yaml"]
     tz["time.yaml"]
     notif["notifications.yaml"]
+    stor["storage.yaml<br/>local content types"]
     bver["verify.yaml"]
     aptpy[/"files/apt_sources.py"/]
     srctpl[/"templates/proxmox.sources.j2"/]
@@ -73,6 +77,13 @@ flowchart LR
     vtpl[/"templates/config.j2"/]
   end
 
+  subgraph rvm["roles/vault_vm"]
+    vmchk["checks.yaml<br/>read-only, runs on PVE host"]
+    vmcre["create.yaml<br/>only when missing"]
+    vmboot["bootstrap.yaml"]
+    vmtpl[/"templates/network.yaml.j2<br/>templates/vendor.yaml.j2"/]
+  end
+
   inv -.-> pb
 
   inspect -->|"pve-07 only"| ginsp
@@ -94,6 +105,7 @@ flowchart LR
   conv --> nag
   conv --> tz
   conv --> notif
+  conv --> stor
   bver --> ident
   bver --> aptinv
   upg -->|"reuses"| pre
@@ -114,6 +126,11 @@ flowchart LR
   vyr -->|"after all routers"| vver
   vyrver --> vver
 
+  vvm --> vmchk
+  vvm -->|"VM missing"| vmcre --> vmtpl
+  vvm -->|"after create"| vmchk
+  vvm --> vmboot
+
   gconf --> ginsp --> gpy
   gconf --> gpre
   gconf --> gtpl
@@ -131,4 +148,4 @@ Solid arrows mean "runs". The dashed arrow from the inventory means every playbo
 - **Roles** group the work. Entry task files such as `converge.yaml` pull in smaller task files. Those use the role's `files/` (scripts piped to the host's Python, never installed) and `templates/` (files rendered with inventory values).
 - **Shared checks.** `pve_baseline/verify.yaml` is the acceptance check for every host. `pve-verify.yaml` runs it on demand, and `pve-baseline.yaml` and `pve-update.yaml` run it after each host before moving on. `pve_update` and `pve_network` reuse the baseline preflight, so updates and network changes require the same identity and full-quorum checks as configuration changes. `pve_network/verify.yaml` is the network acceptance check; `pve-verify.yaml` and `pve-network.yaml` run it, and it compares the live file with the template so UI edits show up as drift.
 
-Only `pve-baseline.yaml`, `pve-update.yaml`, `pve-network.yaml`, `pve-gpu-configure.yaml`, `ts-router.yaml` and `vyos-router.yaml` change hosts. `ts-router.yaml` creates one container on pve-03 and configures it; it does not change the PVE host's own configuration. `vyos-router.yaml` changes only the two router guests. `pve-update.yaml`, `pve-network.yaml` and `pve-gpu-configure.yaml` also require a confirmation variable for a real run.
+Only `pve-baseline.yaml`, `pve-update.yaml`, `pve-network.yaml`, `pve-gpu-configure.yaml`, `ts-router.yaml`, `vyos-router.yaml` and `vault-vm.yaml` change hosts. `ts-router.yaml` creates one container on pve-03 and configures it; it does not change the PVE host's own configuration. `vyos-router.yaml` changes only the two router guests. `vault-vm.yaml` creates a missing OpenBao VM on its PVE host and bootstraps it; it never changes an existing VM's configuration. `pve-update.yaml`, `pve-network.yaml` and `pve-gpu-configure.yaml` also require a confirmation variable for a real run.

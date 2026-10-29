@@ -1,0 +1,20 @@
+---
+# {{ ansible_managed }}
+# Matches the NIC by MAC without renaming it. Proxmox's generated config renames the
+# NIC to eth0, which fails on Ubuntu 26.04's first boot because the dracut initrd has
+# already brought it up, leaving the VM on DHCP (HOMELAB-25).
+network:
+  version: 2
+  ethernets:
+    primary:
+      match:
+        macaddress: "{{ vault_vm_mac | lower }}"
+      addresses:
+        - {{ ansible_host }}/{{ vault_vm_address_prefix }}
+      routes:
+        - to: default
+          via: {{ vault_vm_gateway }}
+      nameservers:
+        addresses: {{ vault_vm_dns_servers | to_json }}
+        search:
+          - {{ vault_vm_domain }}
