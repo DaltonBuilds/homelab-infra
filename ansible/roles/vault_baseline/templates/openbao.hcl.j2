@@ -26,6 +26,16 @@ storage "raft" {
 {% endfor %}
 }
 
+# HOMELAB-34. OpenBao refuses `bao audit enable` over the API; devices are declared here
+# and applied on the active node at startup or on SIGHUP (systemctl reload, no reseal).
+# Every node carries the same stanza, and each writes its own file when it is active.
+audit "file" "file" {
+  description = "Local file audit log, rotated by logrotate (HOMELAB-34)"
+  options {
+    file_path = "{{ vault_baseline_openbao_audit_dir }}/audit.log"
+  }
+}
+
 telemetry {
   prometheus_retention_time = "30s"
   disable_hostname          = true

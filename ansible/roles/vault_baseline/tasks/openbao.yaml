@@ -75,6 +75,16 @@
     mode: '0750'
   when: not vault_baseline_openbao_dry_install | bool
 
+# The config's audit stanza points here, so it must exist before OpenBao loads it.
+- name: Create the audit log directory
+  ansible.builtin.file:
+    path: "{{ vault_baseline_openbao_audit_dir }}"
+    state: directory
+    owner: openbao
+    group: openbao
+    mode: '0750'
+  when: not vault_baseline_openbao_dry_install | bool
+
 # Replaces the package's default file.
 - name: Write the node's OpenBao configuration
   ansible.builtin.template:
@@ -98,11 +108,23 @@
     - vault_baseline_openbao_enabled | bool
     - not vault_baseline_openbao_dry_install | bool
 
-- name: Warn that a running node still has the old configuration
+# SIGHUP reloads what OpenBao can apply live, including audit devices and log level, and
+# does not seal the node. Listener, storage and seal changes still need a restart.
+- name: Reload a running node's configuration
+  ansible.builtin.systemd_service:
+    name: openbao
+    state: reloaded
+  when:
+    - vault_baseline_openbao_enabled | bool
+    - vault_baseline_openbao_config is changed
+    - vault_baseline_openbao_service is not changed
+
+- name: Warn that some settings need a restart
   ansible.builtin.debug:
     msg: >-
-      {{ inventory_hostname }}: openbao.hcl changed while OpenBao was running. Restart it
-      by hand (`sudo systemctl restart openbao`), then unseal it; it stays sealed until then.
+      {{ inventory_hostname }}: openbao.hcl changed and OpenBao was reloaded. Audit and
+      log-level changes are live; listener, storage or seal changes need
+      `sudo systemctl restart openbao` and a manual unseal.
   when:
     - vault_baseline_openbao_enabled | bool
     - vault_baseline_openbao_config is changed
