@@ -11,8 +11,9 @@ set -euo pipefail
 # Never prompt, and never enable an API as a side effect: check must stay read-only.
 export CLOUDSDK_CORE_DISABLE_PROMPTS=1 CLOUDSDK_CORE_SHOULD_PROMPT_TO_ENABLE_API=false
 
-# Project IDs are global; "homelab-vault" is taken. Override any of these from the env.
-GCP_PROJECT="${GCP_PROJECT:-}"
+# Project IDs are global, so the dedicated "homelab-vault" project (HOMELAB-43) is
+# daltonbuilds-homelab-vault (number 598884619232). Override any of these from the env.
+GCP_PROJECT="${GCP_PROJECT:-daltonbuilds-homelab-vault}"
 GCP_BILLING_ACCOUNT="${GCP_BILLING_ACCOUNT:-}"
 GCP_REGION="${GCP_REGION:-us-central1}"
 KEY_RING="vault-unseal"
@@ -26,7 +27,6 @@ ROLE_PERMISSIONS="cloudkms.cryptoKeyVersions.useToDecrypt,cloudkms.cryptoKeyVers
 die() { echo "error: $*" >&2; exit 1; }
 say() { echo "$*" >&2; }
 
-[[ -n "$GCP_PROJECT" ]] || die "set GCP_PROJECT (the homelab-vault project ID)"
 SA="${SA_NAME}@${GCP_PROJECT}.iam.gserviceaccount.com"
 ROLE="projects/${GCP_PROJECT}/roles/${ROLE_ID}"
 KEY_ARGS=(--location="$GCP_REGION" --keyring="$KEY_RING" --project="$GCP_PROJECT")

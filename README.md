@@ -303,12 +303,11 @@ The role releases the hold, installs the new package and holds it again. Upgradi
 
 ## GCP KMS for OpenBao auto-unseal
 
-`gcp/vault-kms.sh` owns the GCP side of Phase 0.6 ([HOMELAB-45](https://daltonbuilds.youtrack.cloud/issue/HOMELAB-45), [HOMELAB-46](https://daltonbuilds.youtrack.cloud/issue/HOMELAB-46)). It manages a dedicated project, the `vault-unseal` keyring in `us-central1`, and the symmetric key `vault-unseal-key` (software protection, 90-day rotation). It also creates the service account `vault-unseal-sa` and a custom role `vaultUnseal` with exactly the three permissions the `gcpckms` seal uses (`cryptoKeyVersions.useToEncrypt`, `cryptoKeyVersions.useToDecrypt`, `cryptoKeys.get`), bound on that one key only. The SA has no project-level roles; `apply` fails if it ever does.
+`gcp/vault-kms.sh` owns the GCP side of Phase 0.6 ([HOMELAB-45](https://daltonbuilds.youtrack.cloud/issue/HOMELAB-45), [HOMELAB-46](https://daltonbuilds.youtrack.cloud/issue/HOMELAB-46)). It manages the dedicated project `daltonbuilds-homelab-vault` (project IDs are global; `homelab-vault` was taken; the owner created it with billing on 2026-10-30, and `GCP_BILLING_ACCOUNT` is needed only if billing is missing), the `vault-unseal` keyring in `us-central1`, and the symmetric key `vault-unseal-key` (software protection, 90-day rotation). It also creates the service account `vault-unseal-sa` and a custom role `vaultUnseal` with exactly the three permissions the `gcpckms` seal uses (`cryptoKeyVersions.useToEncrypt`, `cryptoKeyVersions.useToDecrypt`, `cryptoKeys.get`), bound on that one key only. The SA has no project-level roles; `apply` fails if it ever does.
 
 ```sh
-export GCP_PROJECT=<homelab-vault project ID>    # IDs are global; "homelab-vault" is taken
-gcp/vault-kms.sh check                            # read-only; never prompts or enables APIs
-GCP_BILLING_ACCOUNT=<id> gcp/vault-kms.sh apply   # creates what's missing, then runs check
+gcp/vault-kms.sh check     # read-only; never prompts or enables APIs
+gcp/vault-kms.sh apply     # creates what's missing, then runs check
 ```
 
 Re-running `apply` changes nothing. It never deletes anything and never touches key versions. **Never disable or destroy a key version:** the version that wrapped OpenBao's root key is the only way to unseal the cluster.
