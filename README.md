@@ -8,7 +8,7 @@ Current scope is the Proxmox host baseline ([ADR-013](https://github.com/DaltonB
 
 ```text
 homelab-infra/
-├── mise.toml                        # pinned ansible-core, yamllint, pre-commit
+├── mise.toml                        # pinned ansible-core, openbao CLI, shellcheck, yamllint, pre-commit
 ├── .yamllint.yaml                   # YAML document-start rule
 ├── .pre-commit-config.yaml
 ├── docs/ansible-structure.md        # diagram of how playbooks, roles and inventory connect
@@ -26,13 +26,14 @@ homelab-infra/
 │       ├── vyos_router/             # VyOS VRRP next hop and BGP on bgp-01/bgp-02
 │       ├── vault_vm/                # OpenBao VMs vault-01/02/03: create, check, bootstrap
 │       └── vault_baseline/          # OpenBao VM hardening, firewall, pinned package and openbao.hcl
+├── gcp/vault-kms.sh                 # GCP KMS key + service account for OpenBao auto-unseal
 ├── tailscale/policy.hujson          # tailnet policy, applied by GitHub Actions
 └── .github/workflows/               # tailscale-policy: test on PR, apply on merge
 ```
 
 From the repo root, `mise install` installs the pinned Ansible CLI. `mise.toml` points `ANSIBLE_CONFIG` at `ansible/ansible.cfg`. Galaxy collections install under `ansible/collections/`, which Git ignores: run `mise exec -- ansible-galaxy collection install -r ansible/requirements.yml`. Only `vyos_router` (vyos.vyos, netcommon) and `vault_baseline` (community.general `ufw` and `timezone`) use them; the other roles use only `ansible.builtin`. Shared values live in `inventories/homelab/group_vars/pve.yaml`; per-host differences live in `host_vars/`. See [Ansible structure](docs/ansible-structure.md) for a diagram of how the pieces connect.
 
-`mise run lint` checks that every YAML file starts with `---`. Install the same check as a Git hook with `mise exec -- pre-commit install`.
+`mise run lint` checks that every YAML file starts with `---` and runs shellcheck on `gcp/*.sh`. Install the same check as a Git hook with `mise exec -- pre-commit install`.
 
 Every host must have a verified SSH host key in `~/.ssh/known_hosts`. If a reinstalled host's key changed, compare the fingerprint shown by `ssh-keygen -lf /etc/ssh/ssh_host_ecdsa_key.pub` at its local console before replacing the old entry.
 
@@ -299,6 +300,32 @@ The role releases the hold, installs the new package and holds it again. Upgradi
 **What the package does.** Its `postinst` creates the `openbao` system user, a self-signed TLS key and certificate in `/opt/openbao/tls`, and an empty `/opt/openbao/data`. It does not enable or start the service. The certificate is `CN=OpenBao` with no SANs, valid 3 years, so it can't verify the node IPs. The default `openbao.hcl` uses file storage and an HTTPS listener with that certificate; the template replaces it. `postinst` also runs `chown -R openbao:openbao /etc/openbao` on first install, and the role resets the config to `root:openbao 0640`. Checked against the unpacked 2.6.5 `.deb`, 2026-10-29. The unit's capability bounding set is `CAP_SYSLOG` only because OpenBao 2.0 removed mlock (GH-363). 2.6 flags `disable_mlock` as unknown, so the template leaves it out. `MemorySwapMax=0` and the no-swap rule keep secrets off disk. The self-signed pair is unused: the listener is plain HTTP until Phase 0.7d (HOMELAB-31), and init, unseal and root login run against `127.0.0.1` over SSH, never over the network. `vault_baseline_openbao_enabled` stays false until the Phase 0.5 rollout below; until then a run stops a service started by hand.
 
 **Lifecycle.** At Tier 1 [1.3], import the three VMs into OpenTofu state; never recreate them. Then tag the last commit that contains `create.yaml`, delete that file and its include, and replace this section's create step with a pointer to the tag. Only one tool owns the VMs at any time.
+
+## GCP KMS for OpenBao auto-unseal
+
+`gcp/vault-kms.sh` owns the GCP side of Phase 0.6 ([HOMELAB-45](https://daltonbuilds.youtrack.cloud/issue/HOMELAB-45), [HOMELAB-46](https://daltonbuilds.youtrack.cloud/issue/HOMELAB-46)). It manages the dedicated project `daltonbuilds-homelab-vault` (project IDs are global; `homelab-vault` was taken; the owner created it with billing on 2026-10-30, and `GCP_BILLING_ACCOUNT` is needed only if billing is missing), the `vault-unseal` keyring in `us-central1`, and the symmetric key `vault-unseal-key` (software protection, 90-day rotation). It also creates the service account `vault-unseal-sa` and a custom role `vaultUnseal` with exactly the three permissions the `gcpckms` seal uses (`cryptoKeyVersions.useToEncrypt`, `cryptoKeyVersions.useToDecrypt`, `cryptoKeys.get`), bound on that one key only. The SA has no project-level roles; `apply` fails if it ever does.
+
+```sh
+gcp/vault-kms.sh check     # read-only; never prompts or enables APIs
+gcp/vault-kms.sh apply     # creates what's missing, then runs check
+```
+
+Re-running `apply` changes nothing. It never deletes anything and never touches key versions. **Never disable or destroy a key version:** the version that wrapped OpenBao's root key is the only way to unseal the cluster.
+
+**The service-account key** is the one credential that lives on the vault VMs. `key` writes a new one to stdout and refuses a terminal. Run it from a plain terminal (no session recording, no AI-assisted shell), hold the output in a variable, and store it in `pass` before clearing it:
+
+```sh
+KEY=$(gcp/vault-kms.sh key) \
+  && printf '%s' "$KEY" | pass insert -m homelab/vault/gcp-kms-sa \
+  && pass show homelab/vault/gcp-kms-sa | jq -e '.type == "service_account"' >/dev/null \
+  && echo ok && unset KEY
+```
+
+No `ok`? Keep the terminal open; `$KEY` still holds the key, so rerun only the `pass insert` line. If a key was created but lost, find it with `check` (it lists user-managed keys) and delete it with `gcloud iam service-accounts keys delete`. `vault_baseline` installs the key from `pass` ([HOMELAB-47](https://daltonbuilds.youtrack.cloud/issue/HOMELAB-47)).
+
+**Rotation:** create a new key with the steps above, redeploy with Ansible, restart the vault nodes one at a time (each auto-unseals once Phase 0.6 is done), then delete the old key.
+
+**Lifecycle.** At Tier 1 [1.3], import the project, keyring, key, role, SA and binding into OpenTofu. Then tag the last commit containing this script's `apply`, delete `apply` and keep `check`, as with `vault_vm`.
 
 ## Design references
 

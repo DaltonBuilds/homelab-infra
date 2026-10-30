@@ -29,3 +29,7 @@ id_ed25519
 *.tfstate
 *.tfstate.*
 crash.log
+
+# GCP service-account keys (HOMELAB-46): they live in pass, never in the repo.
+*-sa.json
+gcp-kms*.json
