@@ -1,14 +1,6 @@
 ---
-# HOMELAB-34. Ansible prepares the audit destination and its rotation. Enabling the
-# device (`bao audit enable file ...`) needs a token, so it stays a manual step after init.
-- name: Create the audit log directory
-  ansible.builtin.file:
-    path: "{{ vault_baseline_openbao_audit_dir }}"
-    state: directory
-    owner: openbao
-    group: openbao
-    mode: '0750'
-
+# HOMELAB-34. Ansible prepares the audit destination and its rotation. The device itself
+# is declared in openbao.hcl; OpenBao refuses to enable audit devices over the API.
 - name: Install logrotate
   ansible.builtin.apt:
     name: logrotate
