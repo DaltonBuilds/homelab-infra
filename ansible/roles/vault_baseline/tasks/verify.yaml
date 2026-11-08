@@ -1,5 +1,5 @@
 ---
-# Read-only acceptance checks for HOMELAB-26/27/30/34. vault-baseline.yaml runs them after each
+# Read-only acceptance checks for HOMELAB-26/27/30/34/47. vault-baseline.yaml runs them after each
 # node; vault-verify.yaml runs them on demand.
 - name: Read node state
   ansible.builtin.command: "{{ item.value }}"
@@ -29,6 +29,8 @@
       bao_config: /usr/bin/grep -cE '^ +node_id += "{{ inventory_hostname }}"$|^disable_mlock' {{ vault_baseline_openbao_config_path }}
       bao_audit_dir: /usr/bin/stat -c '%U:%G %a' {{ vault_baseline_openbao_audit_dir }}
       logrotate: /usr/sbin/logrotate --debug /etc/logrotate.d/openbao-audit
+      bao_kms_credentials: /usr/bin/stat -c '%U:%G %a' {{ vault_baseline_gcp_kms_credentials_path }}
+      bao_seal: /usr/bin/grep -c '^seal "gcpckms"' {{ vault_baseline_openbao_config_path }}
 
 - name: Index node state by name
   ansible.builtin.set_fact:
@@ -124,6 +126,18 @@
     fail_msg: >-
       Audit directory on {{ inventory_hostname }} is [{{ st.bao_audit_dir.stdout | trim }}] or
       /etc/logrotate.d/openbao-audit fails `logrotate --debug`. Run vault-baseline.yaml.
+  vars:
+    st: "{{ vault_baseline_state_by_name }}"
+
+# HOMELAB-47. The seal stanza must match the node's intended seal.
+- name: Verify the KMS credential and the configured seal
+  ansible.builtin.assert:
+    that:
+      - st.bao_kms_credentials.stdout | trim == 'openbao:openbao 400'
+      - (st.bao_seal.stdout | trim == '1') == (vault_baseline_openbao_seal == 'gcpckms')
+    fail_msg: >-
+      On {{ inventory_hostname }}: KMS credential [{{ st.bao_kms_credentials.stdout | trim }}{{ st.bao_kms_credentials.stderr | trim }}],
+      gcpckms stanzas {{ st.bao_seal.stdout | trim }}, intended seal {{ vault_baseline_openbao_seal }}. Run vault-baseline.yaml.
   vars:
     st: "{{ vault_baseline_state_by_name }}"
 

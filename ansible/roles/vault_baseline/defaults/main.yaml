@@ -31,3 +31,21 @@ vault_baseline_openbao_enabled: false
 # HOMELAB-34. Each node writes its own copy of the cluster-wide file audit device.
 vault_baseline_openbao_audit_dir: /opt/openbao/audit
 vault_baseline_openbao_audit_rotate: 14
+# HOMELAB-47/48. Seal: shamir until Phase 0.6e migrates a node, then gcpckms. Set per host
+# during the migration (-e or host_vars), then for the group. A seal change takes effect
+# only on restart, which this role never does.
+vault_baseline_openbao_seal: shamir
+# GCP KMS for the gcpckms seal (gcp/vault-kms.sh owns these resources).
+vault_baseline_gcp_kms_project: daltonbuilds-homelab-vault
+vault_baseline_gcp_kms_region: us-central1
+vault_baseline_gcp_kms_key_ring: vault-unseal
+vault_baseline_gcp_kms_crypto_key: vault-unseal-key
+vault_baseline_gcp_kms_credentials_path: /etc/openbao/gcp-kms.json
+# The SA key lives in pass on the workstation and is read only when a node lacks the file
+# or when rotating (-e vault_baseline_gcp_kms_rotate=true), so routine runs never touch pass.
+vault_baseline_gcp_kms_pass_entry: homelab/vault/gcp-kms-sa
+vault_baseline_gcp_kms_rotate: false
+# Loopback ports for the throwaway diagnose config in tasks/kms_preflight.yaml.
+vault_baseline_preflight_api_port: 18200
+vault_baseline_preflight_cluster_port: 18201
+vault_baseline_preflight_unit: openbao-preflight

@@ -26,6 +26,19 @@ storage "raft" {
 {% endfor %}
 }
 
+{% if vault_baseline_openbao_seal == 'gcpckms' %}
+# HOMELAB-48. Auto-unseal with GCP Cloud KMS; the Shamir shares become recovery keys, which
+# cannot unseal. Applied on restart only. Built-in gcpckms is deprecated in 2.6 and removed
+# in 2.7: move to the external KMS plugin before any upgrade past 2.6.x (ADR-006).
+seal "gcpckms" {
+  credentials = "{{ vault_baseline_gcp_kms_credentials_path }}"
+  project     = "{{ vault_baseline_gcp_kms_project }}"
+  region      = "{{ vault_baseline_gcp_kms_region }}"
+  key_ring    = "{{ vault_baseline_gcp_kms_key_ring }}"
+  crypto_key  = "{{ vault_baseline_gcp_kms_crypto_key }}"
+}
+
+{% endif %}
 # HOMELAB-34. OpenBao refuses `bao audit enable` over the API; devices are declared here
 # and applied on the active node at startup or on SIGHUP (systemctl reload, no reseal).
 # Every node carries the same stanza, and each writes its own file when it is active.
