@@ -1,0 +1,134 @@
+---
+# HOMELAB-47: prove a node can use the gcpckms seal before Phase 0.6e migrates it. Runs a
+# throwaway OpenBao server as a transient systemd unit: the gcpckms seal, Raft storage in a
+# scratch directory and a loopback listener on spare ports, so the running cluster, its
+# data and its listeners are untouched. Initializing it makes Cloud KMS encrypt a root key;
+# restarting it must auto-unseal, which makes KMS decrypt it. vault-kms-preflight.yaml.
+#
+# Not `bao operator diagnose`: in 2.6.5 its setSeal() never assigns barrierWrapper, so
+# "Check Autounseal Encryption" panics with a nil pointer for every auto seal.
+- name: Require the KMS credential installed by vault-baseline.yaml
+  ansible.builtin.stat:
+    path: "{{ vault_baseline_gcp_kms_credentials_path }}"
+  register: vault_baseline_preflight_credentials
+  failed_when: not vault_baseline_preflight_credentials.stat.exists
+
+- name: Run a throwaway OpenBao server with the gcpckms seal
+  block:
+    - name: Create a scratch directory
+      ansible.builtin.tempfile:
+        state: directory
+        path: /var/tmp
+        prefix: openbao-preflight.
+      register: vault_baseline_preflight_dir
+
+    - name: Hand the scratch directory to openbao
+      ansible.builtin.file:
+        path: "{{ vault_baseline_preflight_dir.path }}"
+        owner: openbao
+        group: openbao
+        mode: '0700'
+
+    - name: Create the throwaway Raft directory
+      ansible.builtin.file:
+        path: "{{ vault_baseline_preflight_dir.path }}/data"
+        state: directory
+        owner: openbao
+        group: openbao
+        mode: '0700'
+
+    - name: Write the throwaway config
+      ansible.builtin.copy:
+        content: |
+          api_addr     = "http://127.0.0.1:{{ vault_baseline_preflight_api_port }}"
+          cluster_addr = "https://127.0.0.1:{{ vault_baseline_preflight_cluster_port }}"
+
+          listener "tcp" {
+            address         = "127.0.0.1:{{ vault_baseline_preflight_api_port }}"
+            cluster_address = "127.0.0.1:{{ vault_baseline_preflight_cluster_port }}"
+            tls_disable     = 1
+          }
+
+          storage "raft" {
+            path    = "{{ vault_baseline_preflight_dir.path }}/data"
+            node_id = "preflight"
+          }
+
+          seal "gcpckms" {
+            credentials = "{{ vault_baseline_gcp_kms_credentials_path }}"
+            project     = "{{ vault_baseline_gcp_kms_project }}"
+            region      = "{{ vault_baseline_gcp_kms_region }}"
+            key_ring    = "{{ vault_baseline_gcp_kms_key_ring }}"
+            crypto_key  = "{{ vault_baseline_gcp_kms_crypto_key }}"
+          }
+        dest: "{{ vault_baseline_preflight_dir.path }}/preflight.hcl"
+        owner: openbao
+        group: openbao
+        mode: '0600'
+
+    - name: Start the throwaway server
+      ansible.builtin.command: >-
+        /usr/bin/systemd-run --unit={{ vault_baseline_preflight_unit }} --uid=openbao --gid=openbao
+        --property=MemorySwapMax=0 /usr/bin/bao server -config={{ vault_baseline_preflight_dir.path }}/preflight.hcl
+      changed_when: true
+
+    - name: Wait for it to come up uninitialized
+      ansible.builtin.uri:
+        url: http://127.0.0.1:{{ vault_baseline_preflight_api_port }}/v1/sys/health
+        status_code: [200, 429, 472, 473, 501, 503]
+      register: vault_baseline_preflight_health
+      until: vault_baseline_preflight_health.status == 501
+      retries: 15
+      delay: 2
+
+    # The throwaway server's recovery key and root token go nowhere: the task registers
+    # nothing and no_log hides its output. Its data is deleted below.
+    - name: Initialize it, which makes KMS encrypt its root key
+      ansible.builtin.shell: >-
+        /usr/bin/bao operator init -recovery-shares=1 -recovery-threshold=1 -format=json >/dev/null
+      environment:
+        VAULT_ADDR: http://127.0.0.1:{{ vault_baseline_preflight_api_port }}
+      no_log: true
+      changed_when: true
+
+    - name: Require it initialized and unsealed by KMS
+      ansible.builtin.uri:
+        url: http://127.0.0.1:{{ vault_baseline_preflight_api_port }}/v1/sys/seal-status
+      register: vault_baseline_preflight_seal
+      until: vault_baseline_preflight_seal.json.initialized and not vault_baseline_preflight_seal.json.sealed
+      retries: 15
+      delay: 2
+
+    - name: Restart it
+      ansible.builtin.shell: >-
+        /usr/bin/systemctl stop {{ vault_baseline_preflight_unit }} &&
+        /usr/bin/systemd-run --unit={{ vault_baseline_preflight_unit }} --uid=openbao --gid=openbao
+        --property=MemorySwapMax=0 /usr/bin/bao server -config={{ vault_baseline_preflight_dir.path }}/preflight.hcl
+      changed_when: true
+
+    - name: Require it to auto-unseal, which makes KMS decrypt its root key
+      ansible.builtin.uri:
+        url: http://127.0.0.1:{{ vault_baseline_preflight_api_port }}/v1/sys/seal-status
+      register: vault_baseline_preflight_unsealed
+      until: vault_baseline_preflight_unsealed.json is defined and not vault_baseline_preflight_unsealed.json.sealed
+      retries: 15
+      delay: 2
+
+    - name: Note the result
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }}: seal type {{ vault_baseline_preflight_unsealed.json.type }},
+          initialized {{ vault_baseline_preflight_unsealed.json.initialized }},
+          sealed {{ vault_baseline_preflight_unsealed.json.sealed }} after restart.
+  always:
+    - name: Stop the throwaway server
+      ansible.builtin.shell: >-
+        /usr/bin/systemctl stop {{ vault_baseline_preflight_unit }} 2>/dev/null;
+        /usr/bin/systemctl reset-failed {{ vault_baseline_preflight_unit }} 2>/dev/null; true
+      changed_when: false
+
+    - name: Remove the scratch directory
+      ansible.builtin.file:
+        path: "{{ vault_baseline_preflight_dir.path }}"
+        state: absent
+      when: vault_baseline_preflight_dir.path is defined

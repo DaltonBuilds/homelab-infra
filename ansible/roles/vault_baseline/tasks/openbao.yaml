@@ -85,6 +85,39 @@
     mode: '0750'
   when: not vault_baseline_openbao_dry_install | bool
 
+# HOMELAB-47. The gcpckms seal's service-account key. Installed on every node whatever the
+# seal, so a migration only has to change the config. no_log keeps it out of output and
+# diffs; verify checks owner and mode, never content.
+- name: Check for the KMS credential
+  ansible.builtin.stat:
+    path: "{{ vault_baseline_gcp_kms_credentials_path }}"
+    get_checksum: false
+  register: vault_baseline_gcp_kms_credentials
+  when: not vault_baseline_openbao_dry_install | bool
+
+- name: Install the KMS credential from pass
+  ansible.builtin.copy:
+    content: "{{ lookup('ansible.builtin.pipe', 'pass show ' ~ vault_baseline_gcp_kms_pass_entry) }}"
+    dest: "{{ vault_baseline_gcp_kms_credentials_path }}"
+    owner: openbao
+    group: openbao
+    mode: '0400'
+  diff: false
+  no_log: true
+  when:
+    - not vault_baseline_openbao_dry_install | bool
+    - not vault_baseline_gcp_kms_credentials.stat.exists or vault_baseline_gcp_kms_rotate | bool
+
+- name: Keep the KMS credential private to openbao
+  ansible.builtin.file:
+    path: "{{ vault_baseline_gcp_kms_credentials_path }}"
+    owner: openbao
+    group: openbao
+    mode: '0400'
+  when:
+    - not vault_baseline_openbao_dry_install | bool
+    - vault_baseline_gcp_kms_credentials.stat.exists
+
 # Replaces the package's default file.
 - name: Write the node's OpenBao configuration
   ansible.builtin.template:

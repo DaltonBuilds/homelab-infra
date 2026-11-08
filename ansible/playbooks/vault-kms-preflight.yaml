@@ -1,0 +1,25 @@
+---
+# HOMELAB-47: prove every node can use the gcpckms seal before Phase 0.6e migrates it.
+# Changes nothing on the running cluster; see roles/vault_baseline/tasks/kms_preflight.yaml.
+- name: Pre-flight the gcpckms seal on each node
+  hosts: vault
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Run diagnose against a throwaway gcpckms config
+      ansible.builtin.import_role:
+        name: vault_baseline
+        tasks_from: kms_preflight
+
+- name: Compare the three nodes
+  hosts: vault
+  gather_facts: false
+  tasks:
+    # Same key on every node, compared without printing it or its digest.
+    - name: Require one KMS credential across the cluster
+      ansible.builtin.assert:
+        that:
+          - ansible_play_hosts_all | map('extract', hostvars, ['vault_baseline_preflight_credentials', 'stat', 'checksum']) | unique | length == 1
+        fail_msg: The nodes hold different KMS credentials. Re-run vault-baseline.yaml with -e vault_baseline_gcp_kms_rotate=true.
+        quiet: true
+      run_once: true

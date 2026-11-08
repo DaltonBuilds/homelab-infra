@@ -285,6 +285,16 @@ mise exec -- ansible-playbook ansible/playbooks/vault-baseline.yaml --diff --lim
 
 Then set `vault_baseline_openbao_enabled: true` in `group_vars/vault.yaml` and run the play again on all three. Start order doesn't matter: nothing is initialized and `retry_join` waits for a leader. Each node comes up sealed and uninitialized. Init (vault-01 only), unseal and `bao audit enable` are manual steps in the build guide. This repo never handles unseal shares or tokens.
 
+**GCP KMS seal** ([HOMELAB-47](https://daltonbuilds.youtrack.cloud/issue/HOMELAB-47)). `vault_baseline` installs the auto-unseal service-account key as `/etc/openbao/gcp-kms.json` (`openbao:openbao 0400`) on every node. It reads the key from `pass` (`homelab/vault/gcp-kms-sa`) on the workstation only when a node lacks the file, or with `-e vault_baseline_gcp_kms_rotate=true`, so routine runs never touch `pass`. Those tasks run with `no_log`, and verify checks owner and mode, never content. The `pass` lookup needs gpg-agent to have a working pinentry (`pinentry-program /opt/homebrew/bin/pinentry-mac` in `~/.gnupg/gpg-agent.conf`); without one, GPG fails with "No such file or directory".
+
+`vault_baseline_openbao_seal` (default `shamir`) adds the `seal "gcpckms"` block to `openbao.hcl` when set to `gcpckms`. A seal change applies only on restart, which the role never does. The Phase 0.6e migration sets it one node at a time; see the build guide.
+
+`vault-kms-preflight.yaml` proves each node can use the seal before migrating. On each node it runs a **throwaway OpenBao server** as a transient systemd unit (`openbao-preflight`): loopback ports 18200/18201, Raft in a scratch directory under `/var/tmp`, and the gcpckms seal. Initializing it makes KMS encrypt a root key (its recovery key and token go to `/dev/null`); restarting it must auto-unseal, which makes KMS decrypt. Afterwards it stops the unit, deletes the scratch directory, and checks that all three nodes hold the same credential without printing it. The running cluster isn't touched. `bao operator diagnose` can't do this in 2.6.5: its `setSeal()` never assigns `barrierWrapper`, so "Check Autounseal Encryption" panics with a nil pointer for every auto seal.
+
+```sh
+mise exec -- ansible-playbook ansible/playbooks/vault-kms-preflight.yaml
+```
+
 **Pinning a new OpenBao release.** Stay within 2.6.x until the seal-plugin migration spike clears 2.7 (ADR-006). Verify the release's `checksums.txt` with its Sigstore bundle, then set `vault_baseline_openbao_version` and `vault_baseline_openbao_sha256` in `group_vars/vault.yaml`:
 
 ```sh
