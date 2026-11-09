@@ -27,6 +27,8 @@ homelab-infra/
 │       ├── vault_vm/                # OpenBao VMs vault-01/02/03: create, check, bootstrap
 │       └── vault_baseline/          # OpenBao VM hardening, firewall, pinned package and openbao.hcl
 ├── gcp/vault-kms.sh                 # GCP KMS key + service account for OpenBao auto-unseal
+├── pki/root-ca.sh                   # offline root CA ceremony: create, sign the intermediate, safe copy
+├── pki/homelab-root-ca.crt          # the root certificate (public), once the ceremony has run
 ├── tailscale/policy.hujson          # tailnet policy, applied by GitHub Actions
 └── .github/workflows/               # tailscale-policy: test on PR, apply on merge
 ```
@@ -336,6 +338,38 @@ No `ok`? Keep the terminal open; `$KEY` still holds the key, so rerun only the `
 **Rotation:** create a new key with the steps above, redeploy with Ansible, restart the vault nodes one at a time (each auto-unseals once Phase 0.6 is done), then delete the old key.
 
 **Lifecycle.** At Tier 1 [1.3], import the project, keyring, key, role, SA and binding into OpenTofu. Then tag the last commit containing this script's `apply`, delete `apply` and keep `check`, as with `vault_vm`.
+
+## Offline root CA
+
+`pki/root-ca.sh` is the Phase 0.7b root ceremony ([HOMELAB-53](https://daltonbuilds.youtrack.cloud/issue/HOMELAB-53)). The root CA key is ECDSA P-384 and **never enters OpenBao** ([OpenBao PKI considerations](https://openbao.org/docs/secrets/pki/considerations/)). It's created once on the workstation, held in a shell variable, stored straight into `pass` (`homelab/pki/root-ca-key`, GPG-encrypted), and handed to `openssl` through a pipe. It is never written unencrypted to a file. The script needs OpenSSL 3 first on `PATH` (Homebrew's, not macOS's LibreSSL) and no network. Run it from a plain terminal: no session recording, no AI-assisted shell.
+
+```sh
+pki/root-ca.sh create                       # key into pass, self-signed root into pki/homelab-root-ca.crt
+pki/root-ca.sh backup > /Volumes/<usb>/homelab-root-ca-key.pem   # the safe copy, passphrase-encrypted
+pki/root-ca.sh check /Volumes/<usb>/homelab-root-ca-key.pem      # read-only: root, pass entry, safe copy
+pki/root-ca.sh sign pki_int.csr > pki_int.crt                    # 0.7c; prompts before signing
+```
+
+**The root** is `CN=Homelab Root CA`, valid 10 years, `basicConstraints=critical,CA:TRUE,pathlen:1`, `keyUsage=critical,keyCertSign,cRLSign`, with SKI and AKI. It's self-signed with a random 128-bit serial and has no AIA or CRL distribution point. `create` refuses to run if the certificate or the `pass` entry exists, and it smoke-tests `pass` before generating the key. Commit `pki/homelab-root-ca.crt`; it's public. Record its SHA-256 fingerprint, subject and validity on HOMELAB-53.
+
+**Key custody: two copies.**
+
+1. `pass` → `homelab/pki/root-ca-key`, readable only with the GPG key that opens the rest of the store.
+2. The safe: `backup` writes the key as PKCS#8 encrypted with AES-256 (PBKDF2-HMAC-SHA512, 600,000 iterations) under a passphrase you choose. Keep the passphrase apart from the copy. Write the output to an encrypted USB stick, or print it and then delete the file. Prove the copy opens with `check <file>` before it goes in the safe.
+
+Without the root key, the intermediate can't be renewed and nothing new can be chained to this root. Losing both copies means a new root, distributed everywhere.
+
+**Signing the intermediate.** `sign` accepts only a CSR for `CN=Homelab Intermediate CA` with an ECDSA P-256 key and a valid self-signature. It refuses if the root expires within the intermediate's 5-year lifetime and stops if the `pass` key doesn't match the committed root. It prints the CSR's subject and public-key hash, asks for `yes`, and then signs with SHA-384 for 5 years. The extensions come from the script, never from the CSR: `pathlen:0`, `keyCertSign,cRLSign`, SKI/AKI and these name constraints (critical):
+
+| Permitted | Covers |
+|---|---|
+| `DNS:homelab.internal` | every `*.homelab.internal` name, including `vault.homelab.internal` |
+| `DNS:cluster.local` | `svc.cluster.local` and everything under it |
+| `DNS:localhost` | the listener certificate's `localhost` SAN (0.7c) |
+
+IP addresses are deliberately unconstrained, so node, pod, loopback and Tailscale IP SANs still validate. Once a DNS constraint exists, a DNS name outside the list fails validation in Go and OpenSSL, even though OpenBao will still issue it: the `pki_int` roles are the first control, and the constraints protect relying parties. Bare Kubernetes names like `foo.ns.svc` or `kubernetes.default` fall outside them, so use the full `*.svc.cluster.local` form. The certificate goes to stdout (it refuses a terminal), and its metadata goes to stderr for the ticket. Nothing hosts a CRL for an offline root, so a compromised intermediate means a new root. Repeat the signing ceremony before the intermediate expires (around 2031).
+
+**Testing.** Point `ROOT_CA_PASS_ENTRY` and `ROOT_CA_CERT` at a throwaway entry and file, and use a scratch `GNUPGHOME` and `PASSWORD_STORE_DIR`. `ROOT_CA_YES=1` skips the signing prompt; never set it for the real ceremony.
 
 ## Design references
 

@@ -33,3 +33,6 @@ crash.log
 # GCP service-account keys (HOMELAB-46): they live in pass, never in the repo.
 *-sa.json
 gcp-kms*.json
+
+# PKI (HOMELAB-53): CSRs are public but transient; keys never live in the repo.
+*.csr
