@@ -15,4 +15,4 @@ ANSIBLE_CONFIG = "{{config_root}}/ansible/ansible.cfg"
 
 [tasks.lint]
 description = "Require a YAML document start marker; check shell scripts"
-run = ["yamllint .", "shellcheck gcp/*.sh"]
+run = ["yamllint .", "shellcheck gcp/*.sh pki/*.sh"]
