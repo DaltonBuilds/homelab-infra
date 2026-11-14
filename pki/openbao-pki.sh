@@ -243,7 +243,9 @@ check() {
 
   say ""
   say "Record on HOMELAB-54 (all public):"
-  bao_ list -format=json "$MOUNT/issuers" | jq -r '.[]' | while read -r id; do
+  # A for loop, not while-read: ssh would swallow the rest of a piped list from stdin.
+  local id
+  for id in $(bao_ list -format=json "$MOUNT/issuers" | jq -r '.[]'); do
     say "  issuer $id  $(bao_ read -field=issuer_name "$MOUNT/issuer/$id")"
   done
   openssl x509 -in "$INT_CERT" -noout -subject -issuer -serial -startdate -enddate -fingerprint -sha256 \
