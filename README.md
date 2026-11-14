@@ -28,7 +28,8 @@ homelab-infra/
 │       └── vault_baseline/          # OpenBao VM hardening, firewall, pinned package and openbao.hcl
 ├── gcp/vault-kms.sh                 # GCP KMS key + service account for OpenBao auto-unseal
 ├── pki/root-ca.sh                   # offline root CA ceremony: create, sign the intermediate, safe copy
-├── pki/homelab-root-ca.crt          # the root certificate (public), once the ceremony has run
+├── pki/homelab-root-ca.crt          # the root certificate (public)
+├── pki/openbao-pki.sh               # OpenBao intermediate CA (pki_int), roles and PKI hygiene
 ├── tailscale/policy.hujson          # tailnet policy, applied by GitHub Actions
 └── .github/workflows/               # tailscale-policy: test on PR, apply on merge
 ```
@@ -370,6 +371,44 @@ Without the root key, the intermediate can't be renewed and nothing new can be c
 IP addresses are deliberately unconstrained, so node, pod, loopback and Tailscale IP SANs still validate. Once a DNS constraint exists, a DNS name outside the list fails validation in Go and OpenSSL, even though OpenBao will still issue it: the `pki_int` roles are the first control, and the constraints protect relying parties. Bare Kubernetes names like `foo.ns.svc` or `kubernetes.default` fall outside them, so use the full `*.svc.cluster.local` form. The certificate goes to stdout (it refuses a terminal), and its metadata goes to stderr for the ticket. Nothing hosts a CRL for an offline root, so a compromised intermediate means a new root. Repeat the signing ceremony before the intermediate expires (around 2031).
 
 **Testing.** Point `ROOT_CA_PASS_ENTRY` and `ROOT_CA_CERT` at a throwaway entry and file, and use a scratch `GNUPGHOME` and `PASSWORD_STORE_DIR`. `ROOT_CA_YES=1` skips the signing prompt; never set it for the real ceremony.
+
+### OpenBao intermediate CA
+
+`pki/openbao-pki.sh` builds `pki_int` on the cluster ([HOMELAB-54](https://daltonbuilds.youtrack.cloud/issue/HOMELAB-54)). Run it from the repo root in a plain terminal, on the LAN:
+
+```sh
+pki/openbao-pki.sh apply   # set up, then run check
+pki/openbao-pki.sh check   # verify and test-issue; changes nothing except a revoked test certificate
+```
+
+It finds the active node through the unauthenticated `sys/leader`, then does everything over SSH (`dalton@`) against that node's localhost. That's `http://127.0.0.1:8200` until the listener moves to TLS, then `https://127.0.0.1:8200` with `/etc/openbao/ca.pem`. The root token goes from `pass` (`homelab/vault/recovery-keys`) into `bao login -no-print -` on the node, so it's never shown or put in a command line. It's removed from the node when the script exits, even on failure. Only CSRs and certificates reach the workstation.
+
+`apply`:
+
+1. Mounts `pki_int`, with a 5-year max TTL.
+2. Generates the intermediate key `homelab-intermediate-2026` (ECDSA P-256) inside OpenBao, where it stays.
+3. Signs the CSR with `pki/root-ca.sh sign`, which prompts, and writes `pki/homelab-intermediate-2026.crt`. Commit that file; it's public.
+4. Imports the chain.
+5. Names the issuers `homelab-intermediate-2026` (the default) and `homelab-root`.
+6. Sets templated AIA/CRL/OCSP URLs on `https://vault.homelab.internal:8200/v1/pki_int` and turns on auto-tidy.
+7. Writes both roles:
+
+| Role | Issues | TTL | Stored |
+|---|---|---|---|
+| `internal-services` | `homelab.internal`, `svc.cluster.local` and subdomains | 24h | no (`no_store`) |
+| `openbao-listener` | exactly `vault[-0N].homelab.internal`, `localhost`; IPs `127.0.0.1`, `.20`–`.22`; server + client | 30d | yes |
+
+Re-running changes nothing: it reuses the mount, an existing intermediate key (so an aborted run leaves no orphan keys), and a committed certificate whose key matches. If the issuer is already imported, it doesn't sign again.
+
+`check` verifies that:
+
+- the default issuer is the committed intermediate, and that intermediate chains to the root;
+- auto-tidy is on, and no `pki_root` mount exists;
+- each role issues a P-256 certificate that chains to the root, with the right TTL and SANs;
+- `internal-services` stores nothing;
+- `openbao-listener` stores its certificates (the test one is revoked straight away) and refuses names and IPs outside its list.
+
+It ends by printing the issuer IDs and the intermediate's metadata for the ticket.
 
 ## Design references
 
