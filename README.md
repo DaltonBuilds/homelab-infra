@@ -439,12 +439,13 @@ Verify adds: a TLS 1.3 handshake to the node's IP, checked against `ca.pem` and 
 ```sh
 pki/openbao-pki.sh listener                 # all three; plain terminal (root token from pass)
 
-B="mise exec -- ansible-playbook ansible/playbooks/vault-baseline.yaml -e vault_baseline_openbao_tls=true"
-$B --check --diff --limit vault-03
-$B -e vault_baseline_openbao_restart=true --diff --limit vault-03   # standby: restart, rejoin, TLS
-$B -e vault_baseline_openbao_restart=true --diff --limit vault-02
+# A function, not a variable: zsh does not word-split unquoted variables.
+b() { mise exec -- ansible-playbook ansible/playbooks/vault-baseline.yaml -e vault_baseline_openbao_tls=true "$@"; }
+b --check --diff --limit vault-03
+b -e vault_baseline_openbao_restart=true --diff --limit vault-03   # standby: restart, rejoin, TLS
+b -e vault_baseline_openbao_restart=true --diff --limit vault-02
 pki/openbao-pki.sh step-down                # vault-01 hands over to a TLS standby
-$B -e vault_baseline_openbao_restart=true --diff --limit vault-01
+b -e vault_baseline_openbao_restart=true --diff --limit vault-01
 ```
 
 Then set `vault_baseline_openbao_tls: true` in `group_vars/vault.yaml`, and check that `vault-baseline.yaml --check` shows `changed=0` and that `vault-verify.yaml` passes.
