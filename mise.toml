@@ -12,6 +12,8 @@ yamllint = "1.38.0"
 
 [env]
 ANSIBLE_CONFIG = "{{config_root}}/ansible/ansible.cfg"
+# HOMELAB-55: bao and curl from this repo trust the homelab root (public; pki/).
+VAULT_CACERT = "{{config_root}}/pki/homelab-root-ca.crt"
 
 [tasks.lint]
 description = "Require a YAML document start marker; check shell scripts"

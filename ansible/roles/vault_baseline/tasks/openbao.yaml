@@ -118,6 +118,10 @@
     - not vault_baseline_openbao_dry_install | bool
     - vault_baseline_gcp_kms_credentials.stat.exists
 
+- name: Install trust and check the listener certificate
+  ansible.builtin.import_tasks: tls.yaml
+  when: not vault_baseline_openbao_dry_install | bool
+
 # Replaces the package's default file.
 - name: Write the node's OpenBao configuration
   ansible.builtin.template:
@@ -129,8 +133,7 @@
   register: vault_baseline_openbao_config
   when: not vault_baseline_openbao_dry_install | bool
 
-# Starts a stopped service but never restarts a running one: under Shamir a restart
-# seals the node until someone unseals it by hand.
+# Starts a stopped service but never restarts a running one unless asked to (below).
 - name: Enable and start OpenBao
   ansible.builtin.systemd_service:
     name: openbao
@@ -141,6 +144,30 @@
     - vault_baseline_openbao_enabled | bool
     - not vault_baseline_openbao_dry_install | bool
 
+# HOMELAB-55. What the running server serves, which can lag the config until a restart.
+# curl succeeds on any HTTP status once the TLS handshake verifies against the chain.
+- name: Read whether the API answers over TLS
+  ansible.builtin.command: >-
+    /usr/bin/curl -sS -o /dev/null --max-time 5 --cacert {{ vault_baseline_openbao_ca_file }}
+    https://127.0.0.1:{{ vault_baseline_api_port }}/v1/sys/health
+  register: vault_baseline_openbao_tls_probe
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when:
+    - vault_baseline_openbao_enabled | bool
+    - not vault_baseline_openbao_dry_install | bool
+
+- name: Note what the running server needs
+  ansible.builtin.set_fact:
+    vault_baseline_openbao_stale: >-
+      {{ vault_baseline_openbao_enabled | bool
+         and not vault_baseline_openbao_dry_install | bool
+         and vault_baseline_openbao_service is not changed
+         and (vault_baseline_openbao_config is changed
+              or (vault_baseline_openbao_tls_probe.rc == 0) != (vault_baseline_openbao_tls | bool)) }}
+    vault_baseline_openbao_scheme: "{{ 'https' if vault_baseline_openbao_tls_probe.rc | default(1) == 0 else 'http' }}"
+
 # SIGHUP reloads what OpenBao can apply live, including audit devices and log level, and
 # does not seal the node. Listener, storage and seal changes still need a restart.
 - name: Reload a running node's configuration
@@ -148,17 +175,102 @@
     name: openbao
     state: reloaded
   when:
-    - vault_baseline_openbao_enabled | bool
+    - vault_baseline_openbao_stale | bool
     - vault_baseline_openbao_config is changed
-    - vault_baseline_openbao_service is not changed
+    - not vault_baseline_openbao_restart | bool
 
 - name: Warn that some settings need a restart
   ansible.builtin.debug:
     msg: >-
-      {{ inventory_hostname }}: openbao.hcl changed and OpenBao was reloaded. Audit and
-      log-level changes are live; listener, storage or seal changes need
-      `sudo systemctl restart openbao` and a manual unseal.
+      {{ inventory_hostname }}: openbao.hcl differs from what OpenBao runs. Audit and
+      log-level changes are live after the reload; listener, storage or seal changes need a
+      restart: re-run with -e vault_baseline_openbao_restart=true (auto-unseal, standbys first).
   when:
-    - vault_baseline_openbao_enabled | bool
-    - vault_baseline_openbao_config is changed
-    - vault_baseline_openbao_service is not changed
+    - vault_baseline_openbao_stale | bool
+    - not vault_baseline_openbao_restart | bool
+
+- name: Restart OpenBao onto its configuration
+  when:
+    - vault_baseline_openbao_stale | bool
+    - vault_baseline_openbao_restart | bool
+  block:
+    # sys/leader is unauthenticated. Restarting the active node forces an election and drops
+    # in-flight requests; a step-down hands over cleanly.
+    - name: Read whether this node is active
+      ansible.builtin.command: >-
+        /usr/bin/curl -sS --max-time 5 --cacert {{ vault_baseline_openbao_ca_file }}
+        {{ vault_baseline_openbao_scheme }}://127.0.0.1:{{ vault_baseline_api_port }}/v1/sys/leader
+      register: vault_baseline_openbao_leader
+      changed_when: false
+      check_mode: false
+
+    - name: Refuse to restart the active node
+      ansible.builtin.assert:
+        that:
+          - not (vault_baseline_openbao_leader.stdout | from_json).is_self
+        fail_msg: >-
+          {{ inventory_hostname }} is the active node. Run `pki/openbao-pki.sh step-down`,
+          then this play again.
+
+    # Auto-unseal (gcpckms): the node comes back unsealed with no one at the keyboard.
+    - name: Restart OpenBao
+      ansible.builtin.systemd_service:
+        name: openbao
+        state: restarted
+      register: vault_baseline_openbao_restarted
+
+    - name: Wait for it to unseal and rejoin as a standby
+      ansible.builtin.uri:
+        url: "{{ scheme }}://127.0.0.1:{{ vault_baseline_api_port }}/v1/sys/leader"
+        ca_path: "{{ vault_baseline_openbao_ca_file if scheme == 'https' else omit }}"
+      register: vault_baseline_openbao_rejoined
+      until: >-
+        vault_baseline_openbao_rejoined.json is defined
+        and vault_baseline_openbao_rejoined.json.leader_address | default('') | length > 0
+        and vault_baseline_openbao_rejoined.json.raft_applied_index | default(0) | int > 0
+      retries: 30
+      delay: 2
+      vars:
+        scheme: "{{ 'https' if vault_baseline_openbao_tls | bool else 'http' }}"
+      when: not ansible_check_mode
+
+    - name: Require it unsealed
+      ansible.builtin.uri:
+        url: "{{ scheme }}://127.0.0.1:{{ vault_baseline_api_port }}/v1/sys/seal-status"
+        ca_path: "{{ vault_baseline_openbao_ca_file if scheme == 'https' else omit }}"
+      register: vault_baseline_openbao_unsealed
+      failed_when: vault_baseline_openbao_unsealed.json.sealed
+      vars:
+        scheme: "{{ 'https' if vault_baseline_openbao_tls | bool else 'http' }}"
+      when: not ansible_check_mode
+
+- name: Note whether the node now serves TLS
+  ansible.builtin.set_fact:
+    vault_baseline_openbao_serving_tls: >-
+      {{ vault_baseline_openbao_tls | bool and vault_baseline_openbao_enabled | bool
+         and (vault_baseline_openbao_tls_probe.rc | default(1) == 0
+              or vault_baseline_openbao_restarted is changed) }}
+
+# Clients beyond management reach the API only over TLS. A restart that failed has already
+# stopped the play, so this runs only on a node verified above.
+- name: Open the API to the cluster networks once the node serves TLS
+  community.general.ufw:
+    rule: allow
+    from_ip: "{{ item }}"
+    to_port: "{{ vault_baseline_api_port | string }}"
+    proto: tcp
+    comment: openbao-api
+    delete: "{{ not vault_baseline_openbao_serving_tls | bool }}"
+  loop: "{{ vault_baseline_api_tls_sources }}"
+
+# pam_env reads /etc/environment for SSH sessions, interactive or not, and for sudo, so
+# `ssh vault-0X 'bao status'` reaches the local listener with no flags.
+- name: Point local bao clients at the TLS listener
+  ansible.builtin.lineinfile:
+    path: /etc/environment
+    regexp: '^{{ item.key }}='
+    line: '{{ item.key }}={{ item.value }}'
+    state: "{{ 'present' if vault_baseline_openbao_serving_tls | bool else 'absent' }}"
+  loop: "{{ {'VAULT_ADDR': 'https://127.0.0.1:' ~ vault_baseline_api_port, 'VAULT_CACERT': vault_baseline_openbao_ca_file} | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"

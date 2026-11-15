@@ -1,10 +1,18 @@
 # {{ ansible_managed }}
+{% set scheme = 'https' if vault_baseline_openbao_tls | bool else 'http' %}
+{% if vault_baseline_openbao_tls | bool %}
+# HOMELAB-55. The API serves TLS 1.3 with a certificate from pki_int's openbao-listener role.
+# One file holds leaf, chain and key, so the pair can't be out of step; SIGHUP
+# (systemctl reload) loads a renewed file without a restart. 2.6.5 has no tls_auto_reload.
+{% else %}
 # HOMELAB-30/31. Bootstrap transport until Phase 0.7d: plain-HTTP listener, with secrets
-# only ever sent to 127.0.0.1 over SSH. cluster_addr's scheme is ignored; Raft and request
-# forwarding on {{ vault_baseline_cluster_port }} always use TLS.
+# only ever sent to 127.0.0.1 over SSH.
+{% endif %}
+# cluster_addr's scheme is ignored; Raft and request forwarding on
+# {{ vault_baseline_cluster_port }} always use TLS with OpenBao's own cluster certificates.
 
 ui            = true
-api_addr      = "http://{{ ansible_host }}:{{ vault_baseline_api_port }}"
+api_addr      = "{{ scheme }}://{{ ansible_host }}:{{ vault_baseline_api_port }}"
 cluster_addr  = "https://{{ ansible_host }}:{{ vault_baseline_cluster_port }}"
 # No disable_mlock: OpenBao 2.0 removed mlock (GH-363); 2.6 flags the key as unknown. Swap is
 # off and the unit sets MemorySwapMax=0.
@@ -12,7 +20,13 @@ cluster_addr  = "https://{{ ansible_host }}:{{ vault_baseline_cluster_port }}"
 listener "tcp" {
   address         = "0.0.0.0:{{ vault_baseline_api_port }}"
   cluster_address = "0.0.0.0:{{ vault_baseline_cluster_port }}"
+{% if vault_baseline_openbao_tls | bool %}
+  tls_cert_file   = "{{ vault_baseline_openbao_tls_file }}"
+  tls_key_file    = "{{ vault_baseline_openbao_tls_file }}"
+  tls_min_version = "tls13"
+{% else %}
   tls_disable     = 1
+{% endif %}
 }
 
 storage "raft" {
@@ -21,7 +35,12 @@ storage "raft" {
 {% for peer in vault_baseline_cluster_peers %}
 
   retry_join {
+{% if vault_baseline_openbao_tls | bool %}
+    leader_api_addr     = "https://{{ peer }}:{{ vault_baseline_api_port }}"
+    leader_ca_cert_file = "{{ vault_baseline_openbao_ca_file }}"
+{% else %}
     leader_api_addr = "http://{{ peer }}:{{ vault_baseline_api_port }}"
+{% endif %}
   }
 {% endfor %}
 }

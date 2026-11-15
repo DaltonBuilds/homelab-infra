@@ -1,0 +1,62 @@
+---
+# HOMELAB-55 (Phase 0.7d). Trust and the listener's files, before openbao.hcl refers to them.
+# Every file here is public except listener.pem, which pki/openbao-pki.sh listener writes on
+# the node; this role only checks that it is there and private.
+- name: Install the homelab root in the system trust store
+  ansible.builtin.copy:
+    src: "{{ vault_baseline_root_ca_src }}"
+    dest: /usr/local/share/ca-certificates/{{ vault_baseline_root_ca_name }}.crt
+    owner: root
+    group: root
+    mode: '0644'
+  register: vault_baseline_root_ca
+
+# Adds /etc/ssl/certs/homelab-root-ca.crt and the root to ca-certificates.crt.
+- name: Rebuild the system trust store
+  ansible.builtin.command: /usr/sbin/update-ca-certificates
+  when: vault_baseline_root_ca is changed
+  changed_when: true
+
+# Intermediate first, then the root: what local clients and retry_join verify against.
+- name: Install the CA chain for OpenBao clients
+  ansible.builtin.copy:
+    content: |
+      {{ lookup('ansible.builtin.file', vault_baseline_intermediate_ca_src) }}
+      {{ lookup('ansible.builtin.file', vault_baseline_root_ca_src) }}
+    dest: "{{ vault_baseline_openbao_ca_file }}"
+    owner: root
+    group: root
+    mode: '0444'
+
+# The issuing script creates this directory too; the role holds its owner and mode.
+- name: Keep the listener certificate directory private to openbao
+  ansible.builtin.file:
+    path: "{{ vault_baseline_openbao_tls_file | dirname }}"
+    state: directory
+    owner: openbao
+    group: openbao
+    mode: '0700'
+
+- name: Check for the listener certificate
+  ansible.builtin.stat:
+    path: "{{ vault_baseline_openbao_tls_file }}"
+    get_checksum: false
+  register: vault_baseline_listener_file
+
+# Turning TLS on without it would leave OpenBao unable to start at its next restart.
+- name: Require the listener certificate before turning TLS on
+  ansible.builtin.assert:
+    that:
+      - vault_baseline_listener_file.stat.exists
+      - vault_baseline_listener_file.stat.pw_name == 'openbao'
+      - vault_baseline_listener_file.stat.mode == '0400'
+    fail_msg: >-
+      {{ vault_baseline_openbao_tls_file }} on {{ inventory_hostname }} is missing or not
+      openbao 0400. Run `pki/openbao-pki.sh listener {{ ansible_host }}` first.
+  when: vault_baseline_openbao_tls | bool
+
+# postinst generates a self-signed pair nothing uses; the listener has its own file.
+- name: Remove the package's unused TLS pair
+  ansible.builtin.file:
+    path: /opt/openbao/tls
+    state: absent

@@ -1,15 +1,19 @@
 #!/usr/bin/env bash
-# HOMELAB-54: the OpenBao intermediate CA, its issuance roles and PKI hygiene (Phase 0.7c).
+# HOMELAB-54/55: the OpenBao intermediate CA, its issuance roles and PKI hygiene (Phase 0.7c),
+# and the nodes' listener certificates (Phase 0.7d).
 #
-#   pki/openbao-pki.sh apply   mount pki_int, have the root sign its CSR, name the issuers,
-#                              set URLs and auto-tidy, write both roles, then run check
-#   pki/openbao-pki.sh check   report what exists and test issuance from both roles
+#   pki/openbao-pki.sh apply              mount pki_int, have the root sign its CSR, name the
+#                                         issuers, set URLs and auto-tidy, write both roles, then check
+#   pki/openbao-pki.sh check              report what exists and test issuance from both roles
+#   pki/openbao-pki.sh listener [node..]  issue each node's listener certificate on that node
+#   pki/openbao-pki.sh step-down          make the active node hand over to a standby
 #
 # Run it from a plain terminal: no session recording, no AI-assisted shell. Every bao call
 # runs over SSH on the active node against its own localhost. The root token goes from pass
 # into the node's token helper without being shown, and is removed from the node on exit.
 # Only public material (the CSR and certificates) reaches the workstation. apply is safe to
 # re-run: it reuses the mount, the intermediate key and a signed certificate that matches.
+# listener is safe to re-run too: it skips a node whose certificate has LISTENER_MIN_DAYS left.
 set -euo pipefail
 umask 077
 
@@ -27,6 +31,13 @@ CLUSTER_PATH="https://vault.homelab.internal:8200/v1/$MOUNT"
 LISTENER_IPS_CIDR="127.0.0.1/32,192.168.40.20/32,192.168.40.21/32,192.168.40.22/32"
 LISTENER_DOMAINS="vault.homelab.internal,vault-01.homelab.internal,vault-02.homelab.internal,vault-03.homelab.internal,localhost"
 SERVICE_DOMAINS="homelab.internal,svc.cluster.local,homelab-prod.homelab.internal,homelab-dev.homelab.internal,mgmt.homelab.internal"
+# The listener certificate: cert, chain and key in one file the server reads for both halves.
+LISTENER_DIR="${OPENBAO_LISTENER_DIR:-/etc/openbao/tls}"   # overridable for tests
+LISTENER_FILE="$LISTENER_DIR/listener.pem"
+NODE_CA_FILE="/etc/openbao/ca.pem"
+LISTENER_TTL="720h"
+# Reissue when fewer days than this remain; LISTENER_FORCE=1 reissues regardless.
+LISTENER_MIN_DAYS="${LISTENER_MIN_DAYS:-10}"
 
 die() { echo "error: $*" >&2; exit 1; }
 say() { echo "$*" >&2; }
@@ -52,17 +63,27 @@ logout() {
 }
 trap logout EXIT
 
+# How the node's listener serves: HTTPS once 0.7d has restarted it on its certificate, HTTP
+# before. A file on disk isn't enough: listener writes the certificate before the restart.
+set_addr() {
+  if on_node curl -s -o /dev/null --cacert "$NODE_CA_FILE" https://127.0.0.1:8200/v1/sys/health 2>/dev/null; then
+    ADDR="VAULT_ADDR=https://127.0.0.1:8200 VAULT_CACERT=$NODE_CA_FILE"
+  elif on_node curl -sk -o /dev/null https://127.0.0.1:8200/v1/sys/health 2>/dev/null; then
+    # TLS that doesn't verify: an expired listener certificate. Recovery is reissuing it,
+    # which needs the API; the connection stays on the node's own loopback.
+    say "warning: $NODE's listener certificate does not verify; using its loopback without verification"
+    ADDR="VAULT_ADDR=https://127.0.0.1:8200 VAULT_SKIP_VERIFY=true"
+  else
+    ADDR="VAULT_ADDR=http://127.0.0.1:8200"
+  fi
+}
+
 # The active node (or the only node of a non-HA test server); sys/leader is unauthenticated.
 find_active() {
   local n leader
   for n in $OPENBAO_NODES; do
     NODE="$n"
-    # The node's listener: HTTPS once 0.7d has installed the certificate, HTTP before.
-    if on_node test -f /etc/openbao/tls/listener.pem 2>/dev/null; then
-      ADDR="VAULT_ADDR=https://127.0.0.1:8200 VAULT_CACERT=/etc/openbao/ca.pem"
-    else
-      ADDR="VAULT_ADDR=http://127.0.0.1:8200"
-    fi
+    set_addr
     leader="$(bao_ read -format=json sys/leader 2>/dev/null)" || continue
     if jq -e '.data.ha_enabled == false or .data.is_self == true' >/dev/null <<<"$leader"; then
       say "active node: $NODE ($ADDR)"
@@ -252,6 +273,73 @@ check() {
     -ext basicConstraints,keyUsage,nameConstraints 2>&1 | sed 's/^/  /' >&2
 }
 
+# Issue the node's listener certificate on the node itself. OpenBao's response, key
+# included, goes through a pipe from bao to jq to a root shell that writes it next to the
+# live file and renames it into place; nothing of it is printed or reaches the workstation.
+# The leaf alone comes back afterwards to be checked against the committed chain.
+issue_listener() {
+  local name leaf
+  name="$(on_node hostname)"
+  [[ "$name" =~ ^vault-0[1-9]$ ]] || die "$NODE is $name, not a vault node"
+  if [[ "${LISTENER_FORCE:-}" != 1 ]] \
+    && on_node sudo -n openssl x509 -in "$LISTENER_FILE" -noout -checkend $((LISTENER_MIN_DAYS * 86400)) >/dev/null 2>&1; then
+    say "ok      $name: $LISTENER_FILE valid for $LISTENER_MIN_DAYS+ days ($(on_node sudo -n openssl x509 -in "$LISTENER_FILE" -noout -enddate))"
+    return 0
+  fi
+
+  set_addr
+  login
+  # Runs on the node as the SSH user; $1.. are the values below. The root shell checks that
+  # the file holds a certificate and its key before the rename, so a failed issue or a
+  # partial write never replaces the live file.
+  # shellcheck disable=SC2016  # expanded on the node
+  on_node bash -c '
+    set -euo pipefail
+    dir=$1 file=$2; shift 2
+    sudo -n install -d -o openbao -g openbao -m 0700 "$dir"
+    env '"$ADDR"' bao write -format=json pki_int/issue/openbao-listener "$@" \
+      | jq -j ".data | .certificate + \"\\n\" + ((.ca_chain // []) | map(. + \"\\n\") | join(\"\")) + .private_key + \"\\n\"" \
+      | sudo -n sh -c '\''
+          set -e; umask 077
+          tmp=$(mktemp "$1/.listener.pem.XXXXXX")
+          trap "rm -f \"\$tmp\"" EXIT
+          cat >"$tmp"
+          # Each extraction must succeed on its own: two empty outputs would compare equal.
+          cert_pub=$(openssl x509 -in "$tmp" -noout -pubkey) || exit 1
+          key_pub=$(openssl pkey -in "$tmp" -pubout) || exit 1
+          [ -n "$cert_pub" ] && [ "$cert_pub" = "$key_pub" ] || exit 1
+          chown openbao:openbao "$tmp"; chmod 0400 "$tmp"
+          mv -f "$tmp" "$2"
+        '\'' sh "$dir" "$file"
+  ' bash "$LISTENER_DIR" "$LISTENER_FILE" \
+    common_name="$name.homelab.internal" alt_names="vault.homelab.internal,localhost" \
+    ip_sans="127.0.0.1,$NODE" ttl="$LISTENER_TTL" \
+    || die "$name: issuing or installing the listener certificate failed; the live file is unchanged"
+  logout
+
+  # Only the first certificate in the file: the leaf. Public.
+  leaf="$(on_node sudo -n openssl x509 -in "$LISTENER_FILE")"
+  openssl verify -CAfile "$ROOT_CA_CERT" -untrusted "$INT_CERT" <(printf '%s\n' "$leaf") >/dev/null \
+    || die "$name: the new listener certificate does not chain to the root"
+  say "wrote   $name: $LISTENER_FILE"
+  printf '%s\n' "$leaf" | openssl x509 -noout -subject -serial -enddate -fingerprint -sha256 -ext subjectAltName \
+    | sed 's/^/          /' >&2
+
+  # A node already serving this file picks up the new certificate on SIGHUP (no reseal).
+  if on_node sudo -n grep -qs "tls_cert_file *= *\"$LISTENER_FILE\"" /etc/openbao/openbao.hcl; then
+    on_node sudo -n systemctl reload openbao
+    say "          reloaded openbao"
+  fi
+}
+
+listener() {
+  local n nodes="${*:-$OPENBAO_NODES}"
+  for n in $nodes; do
+    NODE="$n"
+    issue_listener
+  done
+}
+
 case "${1:-}" in
   apply)
     find_active; login
@@ -260,5 +348,12 @@ case "${1:-}" in
   check)
     find_active; login
     check ;;
-  *) die "usage: $0 apply|check" ;;
+  listener)
+    shift
+    listener "$@" ;;
+  step-down)
+    find_active; login
+    bao_ operator step-down
+    say "$NODE stepped down; sys/leader on any node names the new active node" ;;
+  *) die "usage: $0 apply|check|listener [node...]|step-down" ;;
 esac

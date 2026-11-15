@@ -7,13 +7,14 @@ vault_baseline_max_clock_offset_ms: 300
 vault_baseline_ssh_sources:
   - 192.168.40.0/24
   - 192.168.10.0/24
-# API: management and the workstation only while the listener is plain HTTP (HOMELAB-31).
-# Phase 0.7d moves homelab-prod and homelab-dev back from revoked to sources.
+# API: management and the workstation always. homelab-prod and homelab-dev only once the
+# node serves TLS (HOMELAB-31/55): the role opens them after this node's listener answers
+# over TLS and closes them while it is plain HTTP.
 vault_baseline_api_port: 8200
 vault_baseline_api_sources:
   - 192.168.40.0/24
   - 192.168.10.0/24
-vault_baseline_api_sources_revoked:
+vault_baseline_api_tls_sources:
   - 192.168.50.0/24
   - 192.168.60.0/24
 # Raft: only the three nodes, one rule each.
@@ -49,3 +50,23 @@ vault_baseline_gcp_kms_rotate: false
 vault_baseline_preflight_api_port: 18200
 vault_baseline_preflight_cluster_port: 18201
 vault_baseline_preflight_unit: openbao-preflight
+
+# HOMELAB-55 (Phase 0.7d). The listener serves TLS from one file holding the leaf, its chain
+# and its key, which pki/openbao-pki.sh listener issues on the node. Off until that file is
+# on every node; the role refuses to turn it on without the file.
+vault_baseline_openbao_tls: false
+vault_baseline_openbao_tls_file: /etc/openbao/tls/listener.pem
+# The CA chain (intermediate + root) clients on the node and retry_join verify against.
+vault_baseline_openbao_ca_file: /etc/openbao/ca.pem
+# The root in the system trust store; later tiers expect /etc/ssl/certs/homelab-root-ca.crt.
+vault_baseline_root_ca_name: homelab-root-ca
+# Public certificates committed in homelab-infra pki/.
+vault_baseline_pki_dir: "{{ playbook_dir }}/../../pki"
+vault_baseline_root_ca_src: "{{ vault_baseline_pki_dir }}/homelab-root-ca.crt"
+vault_baseline_intermediate_ca_src: "{{ vault_baseline_pki_dir }}/homelab-intermediate-2026.crt"
+# A normal run never restarts OpenBao. With this true, a node whose listener, storage or seal
+# config differs from what it runs restarts once, auto-unseals and must come back serving
+# before the play moves on. It refuses the active node: step it down first.
+vault_baseline_openbao_restart: false
+# verify fails when the listener certificate has fewer days left (renewal is 0.7e).
+vault_baseline_listener_min_days: 7
