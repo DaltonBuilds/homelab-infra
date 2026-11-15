@@ -1,5 +1,5 @@
 ---
-# Read-only acceptance checks for HOMELAB-26/27/30/34/47. vault-baseline.yaml runs them after each
+# Read-only acceptance checks for HOMELAB-26/27/30/34/47/55. vault-baseline.yaml runs them after each
 # node; vault-verify.yaml runs them on demand.
 - name: Read node state
   ansible.builtin.command: "{{ item.value }}"
@@ -31,6 +31,21 @@
       logrotate: /usr/sbin/logrotate --debug /etc/logrotate.d/openbao-audit
       bao_kms_credentials: /usr/bin/stat -c '%U:%G %a' {{ vault_baseline_gcp_kms_credentials_path }}
       bao_seal: /usr/bin/grep -c '^seal "gcpckms"' {{ vault_baseline_openbao_config_path }}
+      # HOMELAB-55. Public material only: the served leaf, never the file holding the key.
+      tls_leaf: >-
+        /bin/sh -c '/usr/bin/openssl s_client -connect {{ ansible_host }}:{{ vault_baseline_api_port }}
+        -verify_ip {{ ansible_host }} -CAfile {{ vault_baseline_openbao_ca_file }} -verify_return_error -tls1_3
+        </dev/null 2>/dev/null | /usr/bin/openssl x509 -noout -subject -ext subjectAltName -enddate -nameopt RFC2253'
+      tls12: >-
+        /bin/sh -c '/usr/bin/openssl s_client -connect 127.0.0.1:{{ vault_baseline_api_port }} -tls1_2 </dev/null >/dev/null 2>&1'
+      tls_file: /usr/bin/stat -c '%U:%G %a' {{ vault_baseline_openbao_tls_file }} {{ vault_baseline_openbao_tls_file | dirname }}
+      # The system store alone: localhost must validate with no --cacert.
+      trust_store: /usr/bin/curl -sS -o /dev/null --max-time 5 https://localhost:{{ vault_baseline_api_port }}/v1/sys/health
+      trust_root: /usr/bin/cat /etc/ssl/certs/{{ vault_baseline_root_ca_name }}.crt
+      ca_file: /usr/bin/cat {{ vault_baseline_openbao_ca_file }}
+      ca_perms: /usr/bin/stat -c '%U:%G %a' {{ vault_baseline_openbao_ca_file }}
+      package_tls: /usr/bin/stat /opt/openbao/tls
+      environment: /usr/bin/grep -E '^VAULT_(ADDR|CACERT)=' /etc/environment
 
 - name: Index node state by name
   ansible.builtin.set_fact:
@@ -76,7 +91,8 @@
     ufw: "{{ vault_baseline_state_by_name.ufw }}"
     expected: >-
       {{ (vault_baseline_ssh_sources | map('regex_replace', '^(.*)$', '22/tcp ALLOW IN \1 # ssh') | list)
-       + (vault_baseline_api_sources | map('regex_replace', '^(.*)$', vault_baseline_api_port ~ '/tcp ALLOW IN \1 # openbao-api') | list)
+       + ((vault_baseline_api_sources + (vault_baseline_api_tls_sources if vault_baseline_openbao_tls | bool else []))
+          | map('regex_replace', '^(.*)$', vault_baseline_api_port ~ '/tcp ALLOW IN \1 # openbao-api') | list)
        + (vault_baseline_cluster_peers | map('regex_replace', '^(.*)$', vault_baseline_cluster_port ~ '/tcp ALLOW IN \1 # openbao-raft') | list) }}
 
 - name: Verify the OpenBao package
@@ -156,6 +172,47 @@
     st: "{{ vault_baseline_state_by_name }}"
   when: vault_baseline_openbao_enabled | bool
 
+# HOMELAB-55. The handshake verifies against the chain and the node's IP SAN; TLS 1.2 must
+# fail; the leaf names this node; the system store alone validates localhost.
+- name: Note the listener certificate's remaining days
+  ansible.builtin.set_fact:
+    vault_baseline_listener_days: >-
+      {{ ((st.tls_leaf.stdout | regex_search('(?<=notAfter=).*') | regex_replace(' +', ' ')
+           | to_datetime('%b %d %H:%M:%S %Y GMT')) - now(utc=true)).days }}
+  vars:
+    st: "{{ vault_baseline_state_by_name }}"
+  when:
+    - vault_baseline_openbao_tls | bool
+    - vault_baseline_state_by_name.tls_leaf.rc == 0
+
+- name: Verify the TLS listener, trust and local client settings
+  ansible.builtin.assert:
+    that:
+      - st.tls_leaf.rc == 0
+      - st.tls_leaf.stdout is search('(?m)^subject=CN=' ~ (inventory_hostname ~ '.homelab.internal') | regex_escape ~ '$')
+      - st.tls_leaf.stdout is search('DNS:vault\.homelab\.internal')
+      - st.tls_leaf.stdout is search('DNS:localhost')
+      - st.tls_leaf.stdout is search('IP Address:127\.0\.0\.1')
+      - st.tls_leaf.stdout is search('(?m)IP Address:' ~ (ansible_host | regex_escape) ~ '(,|$)')
+      - vault_baseline_listener_days | int >= vault_baseline_listener_min_days
+      - st.tls12.rc != 0
+      - st.tls_file.stdout_lines == ['openbao:openbao 400', 'openbao:openbao 700']
+      - st.trust_store.rc == 0
+      - st.trust_root.stdout | trim == lookup('ansible.builtin.file', vault_baseline_root_ca_src) | trim
+      - st.ca_file.stdout | trim == (lookup('ansible.builtin.file', vault_baseline_intermediate_ca_src) ~ '\n' ~ lookup('ansible.builtin.file', vault_baseline_root_ca_src)) | trim
+      - st.ca_perms.stdout | trim == 'root:root 444'
+      - st.package_tls.rc != 0
+      - st.environment.stdout_lines | sort == ['VAULT_ADDR=https://127.0.0.1:' ~ vault_baseline_api_port, 'VAULT_CACERT=' ~ vault_baseline_openbao_ca_file]
+    fail_msg: >-
+      TLS on {{ inventory_hostname }} differs. Served leaf (rc {{ st.tls_leaf.rc }}): {{ st.tls_leaf.stdout_lines }};
+      {{ vault_baseline_listener_days | default('?') }} days left (minimum {{ vault_baseline_listener_min_days }});
+      TLS 1.2 rc {{ st.tls12.rc }} (must fail); files {{ st.tls_file.stdout_lines }}; system trust rc {{ st.trust_store.rc }};
+      ca.pem {{ st.ca_perms.stdout | trim }}; /opt/openbao/tls present {{ st.package_tls.rc == 0 }};
+      /etc/environment {{ st.environment.stdout_lines }}. Run vault-baseline.yaml, or pki/openbao-pki.sh listener to renew.
+  vars:
+    st: "{{ vault_baseline_state_by_name }}"
+  when: vault_baseline_openbao_tls | bool
+
 - name: Note this node's results for the cross-node comparison
   ansible.builtin.set_fact:
     vault_baseline_summary:
@@ -168,5 +225,8 @@
       service: "{{ st.bao_enabled.stdout | trim }}/{{ st.bao_active.stdout | trim }}"
       clock_offset_ms: "{{ vault_baseline_clock_offset_ms }}"
       firewall_rules: "{{ st.ufw.stdout_lines | select('search', 'ALLOW IN') | list | length }}"
+      tls: "{{ vault_baseline_openbao_tls | bool }}"
+      listener_days: "{{ vault_baseline_listener_days | default('') }}"
+      listener_cert: "{{ st.tls_leaf.stdout_lines | default([]) | select('search', '^(subject|notAfter)=') | list }}"
   vars:
     st: "{{ vault_baseline_state_by_name }}"

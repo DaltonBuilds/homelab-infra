@@ -25,11 +25,12 @@ homelab-infra/
 │       ├── ts_router/               # Tailscale subnet router container on pve-03
 │       ├── vyos_router/             # VyOS VRRP next hop and BGP on bgp-01/bgp-02
 │       ├── vault_vm/                # OpenBao VMs vault-01/02/03: create, check, bootstrap
-│       └── vault_baseline/          # OpenBao VM hardening, firewall, pinned package and openbao.hcl
+│       └── vault_baseline/          # OpenBao VM hardening, firewall, pinned package, openbao.hcl and TLS
 ├── gcp/vault-kms.sh                 # GCP KMS key + service account for OpenBao auto-unseal
 ├── pki/root-ca.sh                   # offline root CA ceremony: create, sign the intermediate, safe copy
 ├── pki/homelab-root-ca.crt          # the root certificate (public)
-├── pki/openbao-pki.sh               # OpenBao intermediate CA (pki_int), roles and PKI hygiene
+├── pki/homelab-intermediate-2026.crt # the intermediate certificate (public)
+├── pki/openbao-pki.sh               # OpenBao intermediate CA (pki_int), roles, listener certificates
 ├── tailscale/policy.hujson          # tailnet policy, applied by GitHub Actions
 └── .github/workflows/               # tailscale-policy: test on PR, apply on merge
 ```
@@ -267,13 +268,13 @@ mise exec -- ansible-playbook ansible/playbooks/vault-verify.yaml
 1. keeps swap off, now and in `/etc/fstab`;
 2. writes `/etc/ssh/sshd_config.d/10-homelab-hardening.conf` (`PermitRootLogin no`, password and keyboard-interactive logins off), checks it with `sshd -t`, and reloads `ssh`;
 3. sets `America/Denver` and keeps chrony running;
-4. adds the UFW rules before enabling the firewall, so the play's own SSH session stays allowed. The rules: SSH from VLANs 40 and 10; API 8200 from VLANs 40 and 10 only while the listener is plain HTTP (HOMELAB-31; the rules for 50 and 60 are deleted, and Phase 0.7d adds them back); Raft 8201 from `.20`, `.21` and `.22` only, one rule each. Inbound default deny, outbound allow;
+4. adds the UFW rules before enabling the firewall, so the play's own SSH session stays allowed. The rules: SSH from VLANs 40 and 10; API 8200 from VLANs 40 and 10, and from 50 and 60 only once that node serves TLS (HOMELAB-31/55; see [TLS listener](#openbao-tls-listener)); Raft 8201 from `.20`, `.21` and `.22` only, one rule each. Inbound default deny, outbound allow;
 5. downloads `openbao_<version>_linux_amd64.deb`, checks it against `vault_baseline_openbao_sha256`, installs it, holds it with `dpkg --set-selections`, and keeps `openbao` stopped and disabled;
 6. holds `/opt/openbao/data` at `openbao:openbao 0750` and writes the node's `/etc/openbao/openbao.hcl` (`root:openbao 0640`) from `templates/openbao.hcl.j2` ([HOMELAB-30](https://daltonbuilds.youtrack.cloud/issue/HOMELAB-30)), replacing the package default;
-7. with `vault_baseline_openbao_enabled: true`, enables and starts `openbao`. It never restarts a running service: under Shamir a restart seals the node until someone unseals it. If the config changes on a running node, the play reloads it (SIGHUP; no reseal). That applies audit devices and log level live. Listener, storage and seal changes still need a manual restart and unseal, and the play prints a reminder.
+7. with `vault_baseline_openbao_enabled: true`, enables and starts `openbao`. A normal run never restarts a running service. If the config changes on a running node, the play reloads it (SIGHUP; no reseal). That applies audit devices and log level live. Listener, storage and seal changes need a restart, and the play prints a reminder. With `-e vault_baseline_openbao_restart=true` it restarts a node whose config differs from what it runs, once. It refuses the active node (step it down first), then waits for the node to auto-unseal and rejoin as a standby before moving on.
 8. creates `/opt/openbao/audit` (`openbao:openbao 0750`) and `/etc/logrotate.d/openbao-audit` ([HOMELAB-34](https://daltonbuilds.youtrack.cloud/issue/HOMELAB-34)): daily, 14 kept, `compress` + `delaycompress`, and a `postrotate` that runs `systemctl reload openbao`. The unit's `ExecReload` sends SIGHUP to the main process, which makes the file audit device reopen its log. The file is checked with `logrotate --debug` before it's installed. The device itself is declared in `openbao.hcl` (`audit "file" "file"`). OpenBao rejects `bao audit enable` over the API and applies config-declared devices on the active node at startup or reload.
 
-Then it runs `vault_baseline/tasks/verify.yaml` on that node. That checks: no swap; effective `sshd -T`; timezone and chrony sync with an offset under 300 ms; exactly the seven rules and default policies; the held pinned version and the `openbao` user and group; the config's owner, mode and this node's `node_id`, with no `disable_mlock`, the data directory's owner and mode; and the audit directory's owner and mode plus a clean `logrotate --debug` of the rotation file. Before Phase 0.5 enables it, the service must be disabled and inactive, with nothing on 8200/8201 and `/opt/openbao/data` empty. After that it must be enabled and active and listening on 8200. A sealed node doesn't listen on 8201, so 8201 isn't checked.
+Then it runs `vault_baseline/tasks/verify.yaml` on that node. That checks: no swap; effective `sshd -T`; timezone and chrony sync with an offset under 300 ms; exactly the expected rules (seven, nine with TLS) and default policies; the held pinned version and the `openbao` user and group; the config's owner, mode and this node's `node_id`, with no `disable_mlock`, the data directory's owner and mode; and the audit directory's owner and mode plus a clean `logrotate --debug` of the rotation file. With TLS on, it also checks the [TLS listener](#openbao-tls-listener). Before Phase 0.5 enables it, the service must be disabled and inactive, with nothing on 8200/8201 and `/opt/openbao/data` empty. After that it must be enabled and active and listening on 8200. A sealed node doesn't listen on 8201, so 8201 isn't checked.
 
 `vault-verify.yaml` changes nothing ([HOMELAB-28](https://daltonbuilds.youtrack.cloud/issue/HOMELAB-28)). It runs the `vault_vm` placement, configuration, agent and host-key checks and the baseline verify on all three nodes. It then requires one OpenBao version and one PVE host per node, and prints a per-node summary.
 
@@ -310,7 +311,7 @@ grep ' openbao_2.6.5_linux_amd64.deb$' checksums.txt
 
 The role releases the hold, installs the new package and holds it again. Upgrading a running cluster is a Phase 0.5+ maintenance procedure, one node at a time; this play does not sequence that.
 
-**What the package does.** Its `postinst` creates the `openbao` system user, a self-signed TLS key and certificate in `/opt/openbao/tls`, and an empty `/opt/openbao/data`. It does not enable or start the service. The certificate is `CN=OpenBao` with no SANs, valid 3 years, so it can't verify the node IPs. The default `openbao.hcl` uses file storage and an HTTPS listener with that certificate; the template replaces it. `postinst` also runs `chown -R openbao:openbao /etc/openbao` on first install, and the role resets the config to `root:openbao 0640`. Checked against the unpacked 2.6.5 `.deb`, 2026-10-29. The unit's capability bounding set is `CAP_SYSLOG` only because OpenBao 2.0 removed mlock (GH-363). 2.6 flags `disable_mlock` as unknown, so the template leaves it out. `MemorySwapMax=0` and the no-swap rule keep secrets off disk. The self-signed pair is unused: the listener is plain HTTP until Phase 0.7d (HOMELAB-31), and init, unseal and root login run against `127.0.0.1` over SSH, never over the network. `vault_baseline_openbao_enabled` stays false until the Phase 0.5 rollout below; until then a run stops a service started by hand.
+**What the package does.** Its `postinst` creates the `openbao` system user, a self-signed TLS key and certificate in `/opt/openbao/tls`, and an empty `/opt/openbao/data`. It does not enable or start the service. The certificate is `CN=OpenBao` with no SANs, valid 3 years, so it can't verify the node IPs. The default `openbao.hcl` uses file storage and an HTTPS listener with that certificate; the template replaces it. `postinst` also runs `chown -R openbao:openbao /etc/openbao` on first install, and the role resets the config to `root:openbao 0640`. Checked against the unpacked 2.6.5 `.deb`, 2026-10-29. The unit's capability bounding set is `CAP_SYSLOG` only because OpenBao 2.0 removed mlock (GH-363). 2.6 flags `disable_mlock` as unknown, so the template leaves it out. `MemorySwapMax=0` and the no-swap rule keep secrets off disk. The self-signed pair was never used, and the role removes it (HOMELAB-55): the listener was plain HTTP until Phase 0.7d (HOMELAB-31) and now serves the node's own certificate. Init, unseal and root login run against `127.0.0.1` over SSH, never over the network. `vault_baseline_openbao_enabled` stays false until the Phase 0.5 rollout below; until then a run stops a service started by hand.
 
 **Lifecycle.** At Tier 1 [1.3], import the three VMs into OpenTofu state; never recreate them. Then tag the last commit that contains `create.yaml`, delete that file and its include, and replace this section's create step with a pointer to the tag. Only one tool owns the VMs at any time.
 
@@ -381,7 +382,7 @@ pki/openbao-pki.sh apply   # set up, then run check
 pki/openbao-pki.sh check   # verify and test-issue; changes nothing except a revoked test certificate
 ```
 
-It finds the active node through the unauthenticated `sys/leader`, then does everything over SSH (`dalton@`) against that node's localhost. That's `http://127.0.0.1:8200` until the listener moves to TLS, then `https://127.0.0.1:8200` with `/etc/openbao/ca.pem`. The root token goes from `pass` (`homelab/vault/recovery-keys`) into `bao login -no-print -` on the node, so it's never shown or put in a command line. It's removed from the node when the script exits, even on failure. Only CSRs and certificates reach the workstation.
+It finds the active node through the unauthenticated `sys/leader`, then does everything over SSH (`dalton@`) against that node's localhost. That's `http://127.0.0.1:8200` until the node's listener serves TLS, then `https://127.0.0.1:8200` with `/etc/openbao/ca.pem`. It tests the handshake rather than looking for the certificate file, since `listener` writes the file before the restart. The root token goes from `pass` (`homelab/vault/recovery-keys`) into `bao login -no-print -` on the node, so it's never shown or put in a command line. It's removed from the node when the script exits, even on failure. Only CSRs and certificates reach the workstation.
 
 `apply`:
 
@@ -409,6 +410,56 @@ Re-running changes nothing: it reuses the mount, an existing intermediate key (s
 - `openbao-listener` stores its certificates (the test one is revoked straight away) and refuses names and IPs outside its list.
 
 It ends by printing the issuer IDs and the intermediate's metadata for the ticket.
+
+### OpenBao TLS listener
+
+Phase 0.7d ([HOMELAB-55](https://daltonbuilds.youtrack.cloud/issue/HOMELAB-55)) moves the API to TLS 1.3 on each node's own certificate from `openbao-listener`.
+
+**The certificate.** `pki/openbao-pki.sh listener [node...]` issues it **on the node**: `bao write pki_int/issue/openbao-listener` runs over SSH against that node's localhost, with the root token piped from `pass` as above. Its JSON response, key included, goes through a pipe from `bao` to `jq` to a root shell on the node. That shell writes leaf, chain and key into a temporary file in `/etc/openbao/tls`, checks that the certificate and key match, and renames it to `/etc/openbao/tls/listener.pem` (`openbao:openbao 0400`). A failed or refused issue leaves the live file as it was. Nothing of the response is printed. The script then reads back only the leaf, checks it against the committed root and intermediate, and prints its subject, serial, expiry, fingerprint and SANs:
+
+| Node | CN | SANs |
+|---|---|---|
+| `vault-0N` (from `hostname`) | `vault-0N.homelab.internal` | `vault.homelab.internal`, `localhost`, `127.0.0.1`, the node's IP |
+
+It's valid 30 days. Re-running skips a node with more than 10 days left (`LISTENER_MIN_DAYS`; `LISTENER_FORCE=1` reissues). On a node already serving the file it runs `systemctl reload openbao`, so a renewal needs no restart. Renewal is automated in Phase 0.7e ([HOMELAB-56](https://daltonbuilds.youtrack.cloud/issue/HOMELAB-56)); until then, re-run it before the 30 days are up.
+
+**The role** (`vault_baseline_openbao_tls: true`):
+
+- installs `pki/homelab-root-ca.crt` as `/usr/local/share/ca-certificates/homelab-root-ca.crt` and runs `update-ca-certificates` (→ `/etc/ssl/certs/homelab-root-ca.crt`);
+- writes the chain (intermediate, then root) to `/etc/openbao/ca.pem` (`root:root 0444`);
+- refuses to continue if `listener.pem` is missing or isn't `openbao 0400`;
+- renders the listener with `tls_cert_file` and `tls_key_file` both on `listener.pem` and `tls_min_version = "tls13"`, and puts `api_addr` and every `retry_join` on `https://` with `leader_ca_cert_file = "/etc/openbao/ca.pem"`. There's no `tls_auto_reload`: 2.6.5 reports it as unknown and SIGHUP does the job;
+- removes the package's unused `/opt/openbao/tls`;
+- once the node answers over TLS, opens 8200 to VLANs 50 and 60 and sets `VAULT_ADDR=https://127.0.0.1:8200` and `VAULT_CACERT=/etc/openbao/ca.pem` in `/etc/environment`. pam_env reads that for SSH sessions, interactive or not, and for `sudo`, so `ssh dalton@192.168.40.2X bao status` works with no flags. While the node is still plain HTTP, the rules and the variables are removed.
+
+Verify adds: a TLS 1.3 handshake to the node's IP, checked against `ca.pem` and the IP SAN; TLS 1.2 refused; the leaf's CN and SANs; at least 7 days left; `listener.pem` and its directory owner and mode; the system trust store alone validating `https://localhost:8200`; `ca.pem` and the trust store matching the committed files; `/opt/openbao/tls` gone; and the two variables.
+
+**Rollout.** One restart per node, standbys first. Auto-unseal brings each node back with no one at the keyboard. TLS is set per run with `-e` until all three are done, then in `group_vars`:
+
+```sh
+pki/openbao-pki.sh listener                 # all three; plain terminal (root token from pass)
+
+B="mise exec -- ansible-playbook ansible/playbooks/vault-baseline.yaml -e vault_baseline_openbao_tls=true"
+$B --check --diff --limit vault-03
+$B -e vault_baseline_openbao_restart=true --diff --limit vault-03   # standby: restart, rejoin, TLS
+$B -e vault_baseline_openbao_restart=true --diff --limit vault-02
+pki/openbao-pki.sh step-down                # vault-01 hands over to a TLS standby
+$B -e vault_baseline_openbao_restart=true --diff --limit vault-01
+```
+
+Then set `vault_baseline_openbao_tls: true` in `group_vars/vault.yaml`, and check that `vault-baseline.yaml --check` shows `changed=0` and that `vault-verify.yaml` passes.
+
+The play finds out which node is active through `sys/leader` and refuses to restart it, so the order can't be got wrong by accident. Between restarts, mixed HTTP and HTTPS nodes are fine: Raft and request forwarding use port 8201's own TLS, and joined nodes don't use `retry_join`.
+
+The firewall opens per node, after that node's restart and TLS check, not once at the end. It never opens a plain-HTTP listener to VLANs 50/60, which is what "re-open the firewall last" is guarding against.
+
+**Workstation.** `mise.toml` sets `VAULT_CACERT` to `pki/homelab-root-ca.crt`. Each node serves its chain up to the root, so the root alone validates:
+
+```sh
+for H in 192.168.40.20 192.168.40.21 192.168.40.22; do
+  curl -sS --cacert pki/homelab-root-ca.crt -o /dev/null -w "$H %{http_code}\n" https://$H:8200/v1/sys/health
+done   # 200 from the active node, 429 from standbys: both mean TLS validated
+```
 
 ## Design references
 
