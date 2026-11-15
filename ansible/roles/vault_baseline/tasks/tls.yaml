@@ -11,7 +11,8 @@
     mode: '0644'
   register: vault_baseline_root_ca
 
-# Adds /etc/ssl/certs/homelab-root-ca.crt and the root to ca-certificates.crt.
+# Links /etc/ssl/certs/homelab-root-ca.pem (.pem, whatever the source extension) and adds
+# the root to ca-certificates.crt.
 - name: Rebuild the system trust store
   ansible.builtin.command: /usr/sbin/update-ca-certificates
   when: vault_baseline_root_ca is changed
