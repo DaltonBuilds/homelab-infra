@@ -425,7 +425,7 @@ It's valid 30 days. Re-running skips a node with more than 10 days left (`LISTEN
 
 **The role** (`vault_baseline_openbao_tls: true`):
 
-- installs `pki/homelab-root-ca.crt` as `/usr/local/share/ca-certificates/homelab-root-ca.crt` and runs `update-ca-certificates` (→ `/etc/ssl/certs/homelab-root-ca.crt`);
+- installs `pki/homelab-root-ca.crt` as `/usr/local/share/ca-certificates/homelab-root-ca.crt` and runs `update-ca-certificates`, which links it as `/etc/ssl/certs/homelab-root-ca.pem` (Ubuntu names the link `.pem` whatever the source extension);
 - writes the chain (intermediate, then root) to `/etc/openbao/ca.pem` (`root:root 0444`);
 - refuses to continue if `listener.pem` is missing or isn't `openbao 0400`;
 - renders the listener with `tls_cert_file` and `tls_key_file` both on `listener.pem` and `tls_min_version = "tls13"`, and puts `api_addr` and every `retry_join` on `https://` with `leader_ca_cert_file = "/etc/openbao/ca.pem"`. There's no `tls_auto_reload`: 2.6.5 reports it as unknown and SIGHUP does the job;
