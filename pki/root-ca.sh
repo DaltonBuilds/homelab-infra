@@ -127,7 +127,8 @@ sign() {
   local csr="${1:-}"
   [[ -f "$csr" ]] || die "usage: $0 sign <csr-file>"
   [[ ! -t 1 ]] || die "stdout is a terminal; redirect it, e.g. $0 sign int.csr > int.crt"
-  openssl req -in "$csr" -noout -verify 2>/dev/null || die "CSR signature does not verify"
+  # -verify reports success on stdout, which is the certificate's destination.
+  openssl req -in "$csr" -noout -verify >/dev/null 2>&1 || die "CSR signature does not verify"
   [[ "$(openssl req -in "$csr" -noout -subject -nameopt RFC2253)" == "$INT_SUBJECT" ]] \
     || die "CSR $(openssl req -in "$csr" -noout -subject -nameopt RFC2253), expected $INT_SUBJECT"
   openssl req -in "$csr" -noout -text | grep -q 'NIST CURVE: P-256' || die "CSR key is not ECDSA P-256"
