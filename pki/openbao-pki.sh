@@ -7,6 +7,8 @@
 #   pki/openbao-pki.sh check              report what exists and test issuance from both roles
 #   pki/openbao-pki.sh listener [node..]  issue each node's listener certificate on that node
 #   pki/openbao-pki.sh step-down          make the active node hand over to a standby
+#   pki/openbao-pki.sh agent-auth [node..] cert auth for OpenBao Agent's renewal (0.7e): mount,
+#                                         policy and role, then a test login from each node
 #
 # Run it from a plain terminal: no session recording, no AI-assisted shell. Every bao call
 # runs over SSH on the active node against its own localhost. The root token goes from pass
@@ -38,6 +40,11 @@ NODE_CA_FILE="/etc/openbao/ca.pem"
 LISTENER_TTL="720h"
 # Reissue when fewer days than this remain; LISTENER_FORCE=1 reissues regardless.
 LISTENER_MIN_DAYS="${LISTENER_MIN_DAYS:-10}"
+# Cert auth for the agent: a node logs in with its listener certificate and may only renew it.
+AGENT_AUTH_PATH="cert"
+AGENT_ROLE="openbao-listener"
+AGENT_POLICY="openbao-listener-renew"
+AGENT_CNS="vault-01.homelab.internal,vault-02.homelab.internal,vault-03.homelab.internal"
 
 die() { echo "error: $*" >&2; exit 1; }
 say() { echo "$*" >&2; }
@@ -340,6 +347,101 @@ listener() {
   done
 }
 
+# Cert auth only works over TLS: the listener must already serve a certificate that verifies.
+require_tls() {
+  [[ "$ADDR" == "VAULT_ADDR=https://127.0.0.1:8200 VAULT_CACERT=$NODE_CA_FILE" ]] \
+    || die "$NODE does not serve a verifiable TLS listener; finish 0.7d (listener) first"
+}
+
+# The mount, the policy and the role. The role trusts the intermediate alone, so only pki_int
+# certificates log in, and only the three node names: internal-services certificates also
+# chain to pki_int and carry the client flag. The token works from the node's loopback only.
+configure_agent_auth() {
+  if bao_ auth list -format=json | jq -e --arg p "$AGENT_AUTH_PATH/" 'has($p)' >/dev/null; then
+    say "ok      auth $AGENT_AUTH_PATH"
+  else
+    say "enabling auth $AGENT_AUTH_PATH"
+    bao_ auth enable -path="$AGENT_AUTH_PATH" cert >/dev/null
+  fi
+  printf 'path "%s/issue/%s" {\n  capabilities = ["create", "update"]\n}\n' "$MOUNT" openbao-listener \
+    | bao_ policy write "$AGENT_POLICY" - >/dev/null
+  # The default policy stays: the agent renews and looks up its own token with it.
+  bao_ write "auth/$AGENT_AUTH_PATH/certs/$AGENT_ROLE" certificate=- display_name="$AGENT_ROLE" \
+    allowed_common_names="$AGENT_CNS" token_policies="$AGENT_POLICY" \
+    token_ttl=1h token_max_ttl=1h token_bound_cidrs=127.0.0.1/32 <"$INT_CERT" >/dev/null
+  say "ok      policy $AGENT_POLICY, role $AGENT_AUTH_PATH/certs/$AGENT_ROLE (CN $AGENT_CNS)"
+}
+
+# A certificate that chains to pki_int but isn't a node's must not log in. internal-services
+# is the realistic one: P-256, client flag, issued by the same intermediate. Its key stays in
+# a private temporary directory on the node and is removed with it.
+agent_auth_refuses_other_names() {
+  # Exit 1 means refused. Anything else must not pass as a refusal: 0 is a login, 2 a test
+  # certificate that was never issued, 255 an SSH failure.
+  local rc=0
+  # shellcheck disable=SC2016,SC2086  # expanded on the node; ADDR is two words
+  on_node bash -c '
+    set -euo pipefail
+    dir=$(mktemp -d); trap "rm -rf \"\$dir\"" EXIT
+    env "$@" bao write -format=json pki_int/issue/internal-services common_name=test.homelab.internal ttl=1h \
+      | jq -je ".data | .certificate + \"\\n\" + .private_key + \"\\n\"" >"$dir/test.pem" || exit 2
+    if env "$@" bao login -method=cert -token-only -no-store \
+      -client-cert="$dir/test.pem" -client-key="$dir/test.pem" name='"$AGENT_ROLE"' >/dev/null 2>&1; then
+      exit 0
+    fi
+    exit 1
+  ' bash $ADDR || rc=$?
+  case $rc in
+    1) say "ok      $AGENT_AUTH_PATH/$AGENT_ROLE refuses a pki_int certificate for test.homelab.internal" ;;
+    0) die "a test.homelab.internal certificate logged in through $AGENT_AUTH_PATH/$AGENT_ROLE; it must refuse" ;;
+    *) die "the refusal test did not run (exit $rc): issuing the internal-services test certificate failed" ;;
+  esac
+}
+
+# Log in from the node with its listener certificate, as the agent will, and report what the
+# token may do. The token stays in a variable on the node and is revoked before exit.
+agent_test_login() {
+  local name out
+  name="$(on_node hostname)"
+  set_addr
+  require_tls
+  # shellcheck disable=SC2016,SC2086  # expanded on the node; ADDR is two words
+  out="$(on_node bash -c '
+    set -euo pipefail
+    file=$1 role=$2 policy_path=$3 other_path=$4; shift 4
+    VAULT_TOKEN=$(sudo -n -u openbao env "$@" bao login -method=cert -token-only -no-store \
+      -client-cert="$file" -client-key="$file" name="$role")
+    export VAULT_TOKEN
+    trap "env $* bao token revoke -self >/dev/null 2>&1 || true" EXIT
+    jq -cn --argjson t "$(env "$@" bao token lookup -format=json)" \
+      --arg own "$(env "$@" bao token capabilities "$policy_path")" \
+      --arg other "$(env "$@" bao token capabilities "$other_path")" \
+      "{policies: \$t.data.policies, ttl: \$t.data.ttl, cidrs: \$t.data.bound_cidrs, own: \$own, other: \$other}"
+  ' bash "$LISTENER_FILE" "$AGENT_ROLE" "$MOUNT/issue/openbao-listener" "$MOUNT/issue/internal-services" $ADDR)" \
+    || die "$name: cert login with $LISTENER_FILE failed"
+  jq -e --arg p "$AGENT_POLICY" '
+    (.policies | sort) == (["default", $p] | sort) and .ttl <= 3600
+    and .own == "create, update" and .other == "deny"' >/dev/null <<<"$out" \
+    || die "$name: the agent token is not what the role should grant: $out"
+  say "ok      $name: cert login; $(jq -r '"policies \(.policies | join(",")), ttl \(.ttl)s, cidrs \(.cidrs // [] | join(",")); issue/openbao-listener: \(.own); issue/internal-services: \(.other)"' <<<"$out")"
+}
+
+agent_auth() {
+  local n nodes="${*:-$OPENBAO_NODES}"
+  [[ -f "$INT_CERT" ]] || die "$INT_CERT not found; run apply"
+  find_active
+  require_tls
+  login
+  configure_agent_auth
+  agent_auth_refuses_other_names
+  logout
+  # Each node, standbys included: a standby forwards the login to the active node.
+  for n in $nodes; do
+    NODE="$n"
+    agent_test_login
+  done
+}
+
 case "${1:-}" in
   apply)
     find_active; login
@@ -355,5 +457,8 @@ case "${1:-}" in
     find_active; login
     bao_ operator step-down
     say "$NODE stepped down; sys/leader on any node names the new active node" ;;
-  *) die "usage: $0 apply|check|listener [node...]|step-down" ;;
+  agent-auth)
+    shift
+    agent_auth "$@" ;;
+  *) die "usage: $0 apply|check|listener [node...]|step-down|agent-auth [node...]" ;;
 esac

@@ -30,7 +30,7 @@ homelab-infra/
 ├── pki/root-ca.sh                   # offline root CA ceremony: create, sign the intermediate, safe copy
 ├── pki/homelab-root-ca.crt          # the root certificate (public)
 ├── pki/homelab-intermediate-2026.crt # the intermediate certificate (public)
-├── pki/openbao-pki.sh               # OpenBao intermediate CA (pki_int), roles, listener certificates
+├── pki/openbao-pki.sh               # OpenBao intermediate CA (pki_int), roles, listener certificates, agent cert auth
 ├── tailscale/policy.hujson          # tailnet policy, applied by GitHub Actions
 └── .github/workflows/               # tailscale-policy: test on PR, apply on merge
 ```
@@ -460,6 +460,21 @@ The firewall opens per node, after that node's restart and TLS check, not once a
 for H in 192.168.40.20 192.168.40.21 192.168.40.22; do
   curl -sS --cacert pki/homelab-root-ca.crt -o /dev/null -w "$H %{http_code}\n" https://$H:8200/v1/sys/health
 done   # 200 from the active node, 429 from standbys: both mean TLS validated
+```
+
+### Listener renewal
+
+Phase 0.7e ([HOMELAB-56](https://daltonbuilds.youtrack.cloud/issue/HOMELAB-56)) hands renewal to OpenBao Agent on each node. The agent logs in with the node's current listener certificate, so there's no static secret on the node.
+
+**Cert auth.** `pki/openbao-pki.sh agent-auth [node...]` sets it up on the active node with the root token from `pass`, and is safe to re-run:
+
+- `auth/cert` with role `openbao-listener`: trusts the committed intermediate alone, and only the CNs `vault-0[1-3].homelab.internal`. The CN list is what matters: `internal-services` certificates chain to the same intermediate and also carry the client flag;
+- tokens get policy `openbao-listener-renew` (`create`, `update` on `pki_int/issue/openbao-listener`, nothing else) plus `default`, which the agent needs to renew and look up its own token; 1h TTL and maximum; bound to `127.0.0.1/32`, since the agent talks to its own node's loopback.
+
+It then proves it: a `test.homelab.internal` certificate from `internal-services` is refused, and each node, standbys included, logs in as `openbao` with `listener.pem` and gets a token that can issue from `openbao-listener` and is denied `internal-services`. Test tokens are revoked on the node; nothing secret is printed.
+
+```sh
+pki/openbao-pki.sh agent-auth               # plain terminal (root token from pass)
 ```
 
 ## Design references
