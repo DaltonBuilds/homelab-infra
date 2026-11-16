@@ -37,7 +37,8 @@ SERVICE_DOMAINS="homelab.internal,svc.cluster.local,homelab-prod.homelab.interna
 LISTENER_DIR="${OPENBAO_LISTENER_DIR:-/etc/openbao/tls}"   # overridable for tests
 LISTENER_FILE="$LISTENER_DIR/listener.pem"
 NODE_CA_FILE="/etc/openbao/ca.pem"
-LISTENER_TTL="720h"
+# A short value (with LISTENER_FORCE=1) starts the 0.7e renewal test; normally the role's 30 days.
+LISTENER_TTL="${LISTENER_TTL:-720h}"
 # Reissue when fewer days than this remain; LISTENER_FORCE=1 reissues regardless.
 LISTENER_MIN_DAYS="${LISTENER_MIN_DAYS:-10}"
 # Cert auth for the agent: a node logs in with its listener certificate and may only renew it.

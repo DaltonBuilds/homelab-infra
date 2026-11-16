@@ -1,0 +1,68 @@
+---
+# HOMELAB-56 (Phase 0.7e). OpenBao Agent renews listener.pem; a root path unit reloads
+# OpenBao when the file changes. The agent logs in with the certificate it renews, so it
+# needs the TLS listener and auth/cert (pki/openbao-pki.sh agent-auth).
+- name: Require the TLS listener for the agent
+  ansible.builtin.assert:
+    that:
+      - vault_baseline_openbao_tls | bool
+      - vault_baseline_openbao_enabled | bool
+    fail_msg: >-
+      The agent logs in over TLS with the listener certificate. Turn on
+      vault_baseline_openbao_tls (Phase 0.7d) first.
+
+- name: Write the agent configuration
+  ansible.builtin.template:
+    src: openbao-agent.hcl.j2
+    dest: "{{ vault_baseline_agent_config_path }}"
+    owner: root
+    group: openbao
+    mode: '0640'
+  register: vault_baseline_agent_config
+
+- name: Install the agent and reload units
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: /etc/systemd/system/{{ item }}
+    owner: root
+    group: root
+    mode: '0644'
+  loop:
+    - openbao-tls.service
+    - openbao-tls.path
+    - openbao-agent.service
+    - openbao-agent.timer
+  register: vault_baseline_agent_units
+
+- name: Reload systemd after a unit change
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: vault_baseline_agent_units is changed
+
+# The watch comes first, so the agent's first renewal is already reloaded.
+- name: Watch the listener certificate
+  ansible.builtin.systemd_service:
+    name: openbao-tls.path
+    enabled: true
+    # Restarted after a unit change, so a new interval or path applies now.
+    state: "{{ 'restarted' if vault_baseline_agent_units is changed else 'started' }}"
+  # A dry run of the first install has no unit to start.
+  when: not (ansible_check_mode and vault_baseline_agent_units is changed)
+
+- name: Run the agent on its timer
+  ansible.builtin.systemd_service:
+    name: openbao-agent.timer
+    enabled: true
+    # Restarted after a unit change, so a new interval or path applies now.
+    state: "{{ 'restarted' if vault_baseline_agent_units is changed else 'started' }}"
+  # A dry run of the first install has no unit to start.
+  when: not (ansible_check_mode and vault_baseline_agent_units is changed)
+
+# Proves a new or changed configuration logs in and renders before the play moves on. A
+# certificate with more than 1/9 of its lifetime left is left alone, so this rarely renews.
+- name: Run the agent once after a change
+  ansible.builtin.command: /usr/bin/systemctl start openbao-agent.service
+  when:
+    - vault_baseline_agent_config is changed or vault_baseline_agent_units is changed
+    - not ansible_check_mode
+  changed_when: true

@@ -1,5 +1,5 @@
 ---
-# Read-only acceptance checks for HOMELAB-26/27/30/34/47/55. vault-baseline.yaml runs them after each
+# Read-only acceptance checks for HOMELAB-26/27/30/34/47/55/56. vault-baseline.yaml runs them after each
 # node; vault-verify.yaml runs them on demand.
 - name: Read node state
   ansible.builtin.command: "{{ item.value }}"
@@ -35,7 +35,9 @@
       tls_leaf: >-
         /bin/sh -c '/usr/bin/openssl s_client -connect {{ ansible_host }}:{{ vault_baseline_api_port }}
         -verify_ip {{ ansible_host }} -CAfile {{ vault_baseline_openbao_ca_file }} -verify_return_error -tls1_3
-        </dev/null 2>/dev/null | /usr/bin/openssl x509 -noout -subject -ext subjectAltName -enddate -nameopt RFC2253'
+        </dev/null 2>/dev/null | /usr/bin/openssl x509 -noout -subject -ext subjectAltName -enddate -serial -nameopt RFC2253'
+      # The first certificate in the file: the leaf. Its serial must be the one served.
+      tls_file_serial: /usr/bin/openssl x509 -in {{ vault_baseline_openbao_tls_file }} -noout -serial
       tls12: >-
         /bin/sh -c '/usr/bin/openssl s_client -connect 127.0.0.1:{{ vault_baseline_api_port }} -tls1_2 </dev/null >/dev/null 2>&1'
       tls_file: /usr/bin/stat -c '%U:%G %a' {{ vault_baseline_openbao_tls_file }} {{ vault_baseline_openbao_tls_file | dirname }}
@@ -46,6 +48,10 @@
       ca_perms: /usr/bin/stat -c '%U:%G %a' {{ vault_baseline_openbao_ca_file }}
       package_tls: /usr/bin/stat /opt/openbao/tls
       environment: /usr/bin/grep -E '^VAULT_(ADDR|CACERT)=' /etc/environment
+      # HOMELAB-56. A unit that never ran since boot reports Result=success, ExecMainStatus=0.
+      agent_units: /bin/sh -c '/usr/bin/systemctl is-enabled openbao-agent.timer openbao-tls.path; /usr/bin/systemctl is-active openbao-agent.timer openbao-tls.path'
+      agent_result: /usr/bin/systemctl show -p Result -p ExecMainStatus openbao-agent.service openbao-tls.service
+      agent_backup: /usr/bin/stat {{ vault_baseline_openbao_tls_file }}.bak
 
 - name: Index node state by name
   ansible.builtin.set_fact:
@@ -194,7 +200,8 @@
       - st.tls_leaf.stdout is search('DNS:localhost')
       - st.tls_leaf.stdout is search('IP Address:127\.0\.0\.1')
       - st.tls_leaf.stdout is search('(?m)IP Address:' ~ (ansible_host | regex_escape) ~ '(,|$)')
-      - vault_baseline_listener_days | int >= vault_baseline_listener_min_days
+      - vault_baseline_listener_days | int >= vault_baseline_listener_min_days | int
+      - st.tls_leaf.stdout is search('(?m)^serial=' ~ (st.tls_file_serial.stdout | regex_search('(?<=serial=).*')) ~ '$')
       - st.tls12.rc != 0
       - st.tls_file.stdout_lines == ['openbao:openbao 400', 'openbao:openbao 700']
       - st.trust_store.rc == 0
@@ -206,12 +213,29 @@
     fail_msg: >-
       TLS on {{ inventory_hostname }} differs. Served leaf (rc {{ st.tls_leaf.rc }}): {{ st.tls_leaf.stdout_lines }};
       {{ vault_baseline_listener_days | default('?') }} days left (minimum {{ vault_baseline_listener_min_days }});
+      file {{ st.tls_file_serial.stdout | trim }} (must be the served serial; if not, `systemctl reload openbao`);
       TLS 1.2 rc {{ st.tls12.rc }} (must fail); files {{ st.tls_file.stdout_lines }}; system trust rc {{ st.trust_store.rc }};
       ca.pem {{ st.ca_perms.stdout | trim }}; /opt/openbao/tls present {{ st.package_tls.rc == 0 }};
       /etc/environment {{ st.environment.stdout_lines }}. Run vault-baseline.yaml, or pki/openbao-pki.sh listener to renew.
   vars:
     st: "{{ vault_baseline_state_by_name }}"
   when: vault_baseline_openbao_tls | bool
+
+# HOMELAB-56. The timer and the watch are on, the last agent run and the last reload
+# succeeded, and the agent left no backup holding the old key.
+- name: Verify the listener renewal
+  ansible.builtin.assert:
+    that:
+      - st.agent_units.stdout_lines == ['enabled', 'enabled', 'active', 'active']
+      - st.agent_result.stdout_lines | select | list == ['Result=success', 'ExecMainStatus=0', 'Result=success', 'ExecMainStatus=0']
+      - st.agent_backup.rc != 0
+    fail_msg: >-
+      Renewal on {{ inventory_hostname }}: timer and path unit {{ st.agent_units.stdout_lines }};
+      last runs {{ st.agent_result.stdout_lines | select | list }} (agent, then reload); backup present
+      {{ st.agent_backup.rc == 0 }}. See `journalctl -u openbao-agent -u openbao-tls`.
+  vars:
+    st: "{{ vault_baseline_state_by_name }}"
+  when: vault_baseline_openbao_agent | bool
 
 - name: Note this node's results for the cross-node comparison
   ansible.builtin.set_fact:
@@ -227,6 +251,6 @@
       firewall_rules: "{{ st.ufw.stdout_lines | select('search', 'ALLOW IN') | list | length }}"
       tls: "{{ vault_baseline_openbao_tls | bool }}"
       listener_days: "{{ vault_baseline_listener_days | default('') }}"
-      listener_cert: "{{ st.tls_leaf.stdout_lines | default([]) | select('search', '^(subject|notAfter)=') | list }}"
+      listener_cert: "{{ st.tls_leaf.stdout_lines | default([]) | select('search', '^(subject|notAfter|serial)=') | list }}"
   vars:
     st: "{{ vault_baseline_state_by_name }}"
