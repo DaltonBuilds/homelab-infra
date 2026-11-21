@@ -9,6 +9,7 @@
 #   pki/openbao-pki.sh step-down          make the active node hand over to a standby
 #   pki/openbao-pki.sh agent-auth [node..] cert auth for OpenBao Agent's renewal (0.7e): mount,
 #                                         policy and role, then a test login from each node
+#   pki/openbao-pki.sh cluster            Raft voters, autopilot health and audit devices; changes nothing
 #
 # Run it from a plain terminal: no session recording, no AI-assisted shell. Every bao call
 # runs over SSH on the active node against its own localhost. The root token goes from pass
@@ -443,6 +444,40 @@ agent_auth() {
   done
 }
 
+# Raft membership, autopilot health and the audit devices, as seen by the active node. All
+# public: node IDs, addresses, states. Fails unless every expected node is a healthy voter.
+cluster() {
+  local peers autopilot audit expected
+  expected="$(wc -w <<<"$OPENBAO_NODES" | tr -d ' ')"
+  find_active
+  login
+  peers="$(bao_ operator raft list-peers -format=json)"
+  autopilot="$(bao_ operator raft autopilot state -format=json)"
+  audit="$(bao_ audit list -format=json)"
+  logout
+  jq -r '.data.config.servers[] | "  \(.node_id)  \(.address)  \(if .leader then "leader" else "follower" end)  \(if .voter then "voter" else "non-voter" end)"' \
+    <<<"$peers" >&2
+  # The CLI prints the Go struct, whose fields have no JSON tags (Healthy, FailureTolerance,
+  # Servers); the API's own names are snake_case. Read either.
+  autopilot="$(jq '(.data // .) | {
+      healthy: (if has("Healthy") then .Healthy else .healthy end),
+      failure_tolerance: (.FailureTolerance // .failure_tolerance),
+      servers: ((.Servers // .servers // {}) | map_values({
+        status: (.Status // .status),
+        healthy: (if has("Healthy") then .Healthy else .healthy end),
+        last_index: (.LastIndex // .last_index)}))}' <<<"$autopilot")"
+  jq -r '"  autopilot healthy=\(.healthy) failure_tolerance=\(.failure_tolerance)",
+    (.servers | to_entries[] | "    \(.key) \(.value.status) healthy=\(.value.healthy) last_index=\(.value.last_index)")' \
+    <<<"$autopilot" >&2
+  jq -r 'to_entries[] | "  audit \(.key) \(.value.type)"' <<<"$audit" >&2
+  jq -e --argjson n "$expected" '[.data.config.servers[] | select(.voter)] | length == $n' >/dev/null <<<"$peers" \
+    || die "fewer than $expected voters"
+  jq -e '.healthy == true and (.servers | length) == '"$expected"'' >/dev/null <<<"$autopilot" \
+    || die "autopilot reports the cluster unhealthy, or not every server"
+  jq -e 'length > 0' >/dev/null <<<"$audit" || die "no audit device is enabled"
+  say "ok      $expected voters, autopilot healthy, audit enabled"
+}
+
 case "${1:-}" in
   apply)
     find_active; login
@@ -461,5 +496,7 @@ case "${1:-}" in
   agent-auth)
     shift
     agent_auth "$@" ;;
-  *) die "usage: $0 apply|check|listener [node...]|step-down|agent-auth [node...]" ;;
+  cluster)
+    cluster ;;
+  *) die "usage: $0 apply|check|listener [node...]|step-down|agent-auth [node...]|cluster" ;;
 esac

@@ -380,6 +380,7 @@ IP addresses are deliberately unconstrained, so node, pod, loopback and Tailscal
 ```sh
 pki/openbao-pki.sh apply   # set up, then run check
 pki/openbao-pki.sh check   # verify and test-issue; changes nothing except a revoked test certificate
+pki/openbao-pki.sh cluster # Raft voters, autopilot health, audit devices; fails unless all three are healthy voters
 ```
 
 It finds the active node through the unauthenticated `sys/leader`, then does everything over SSH (`dalton@`) against that node's localhost. That's `http://127.0.0.1:8200` until the node's listener serves TLS, then `https://127.0.0.1:8200` with `/etc/openbao/ca.pem`. It tests the handshake rather than looking for the certificate file, since `listener` writes the file before the restart. The root token goes from `pass` (`homelab/vault/recovery-keys`) into `bao login -no-print -` on the node, so it's never shown or put in a command line. It's removed from the node when the script exits, even on failure. Only CSRs and certificates reach the workstation.
