@@ -1,0 +1,12 @@
+# {{ ansible_managed }}
+# HOMELAB-56. The agent renames a new listener.pem into place; SIGHUP makes OpenBao serve
+# it with no restart and no reseal. The agent stays unprivileged; this unit runs as root.
+[Unit]
+Description=Watch the OpenBao listener certificate
+
+[Path]
+PathChanged={{ vault_baseline_openbao_tls_file }}
+Unit=openbao-tls.service
+
+[Install]
+WantedBy=paths.target

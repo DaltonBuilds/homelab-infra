@@ -1,0 +1,52 @@
+# {{ ansible_managed }}
+# HOMELAB-56 (Phase 0.7e). One pass per timer run: log in with the node's listener
+# certificate (auth/cert, role {{ vault_baseline_agent_role }}), render listener.pem, exit.
+# pkiCert reads the live file first and issues a new certificate only when about 1/9 of the
+# current one's lifetime is left, so most runs change nothing.
+exit_after_auth = true
+
+vault {
+  address = "https://127.0.0.1:{{ vault_baseline_api_port }}"
+  ca_cert = "{{ vault_baseline_openbao_ca_file }}"
+
+  retry {
+    num_retries = 3
+  }
+}
+
+auto_auth {
+  method "cert" {
+    config = {
+      name        = "{{ vault_baseline_agent_role }}"
+      ca_cert     = "{{ vault_baseline_openbao_ca_file }}"
+      client_cert = "{{ vault_baseline_openbao_tls_file }}"
+      client_key  = "{{ vault_baseline_openbao_tls_file }}"
+    }
+  }
+}
+
+template_config {
+  exit_on_retry_failure = true
+}
+
+# The same layout pki/openbao-pki.sh listener writes: leaf, intermediate, root, key. The
+# chain comes from ca.pem, because pkiCert keeps only one CA certificate and, reading the
+# live file, would keep the root and drop the intermediate. With nothing due, the render
+# matches the file byte for byte and nothing is written. The write is a temporary file in
+# the same directory renamed into place; openbao-tls.path reloads OpenBao on the rename.
+# No backup: it would be a second copy of the old key.
+template {
+  destination          = "{{ vault_baseline_openbao_tls_file }}"
+  perms                = "0400"
+  backup               = false
+  create_dest_dirs     = false
+  error_on_missing_key = true
+  left_delimiter       = "[["
+  right_delimiter      = "]]"
+  # The trim markers ([[- and -]]) drop the line breaks, so the render is exactly the PEMs.
+  contents             = <<EOT
+[[- with pkiCert "pki_int/issue/openbao-listener" "common_name={{ inventory_hostname }}.homelab.internal" "alt_names=vault.homelab.internal,localhost" "ip_sans=127.0.0.1,{{ ansible_host }}" "ttl={{ vault_baseline_listener_ttl }}" -]]
+[[- .Data.Cert ]][[ file "{{ vault_baseline_openbao_ca_file }}" ]][[ .Data.Key ]]
+[[- end -]]
+EOT
+}

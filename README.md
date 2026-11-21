@@ -30,7 +30,7 @@ homelab-infra/
 ├── pki/root-ca.sh                   # offline root CA ceremony: create, sign the intermediate, safe copy
 ├── pki/homelab-root-ca.crt          # the root certificate (public)
 ├── pki/homelab-intermediate-2026.crt # the intermediate certificate (public)
-├── pki/openbao-pki.sh               # OpenBao intermediate CA (pki_int), roles, listener certificates
+├── pki/openbao-pki.sh               # OpenBao intermediate CA (pki_int), roles, listener certificates, agent cert auth
 ├── tailscale/policy.hujson          # tailnet policy, applied by GitHub Actions
 └── .github/workflows/               # tailscale-policy: test on PR, apply on merge
 ```
@@ -421,7 +421,7 @@ Phase 0.7d ([HOMELAB-55](https://daltonbuilds.youtrack.cloud/issue/HOMELAB-55)) 
 |---|---|---|
 | `vault-0N` (from `hostname`) | `vault-0N.homelab.internal` | `vault.homelab.internal`, `localhost`, `127.0.0.1`, the node's IP |
 
-It's valid 30 days. Re-running skips a node with more than 10 days left (`LISTENER_MIN_DAYS`; `LISTENER_FORCE=1` reissues). On a node already serving the file it runs `systemctl reload openbao`, so a renewal needs no restart. Renewal is automated in Phase 0.7e ([HOMELAB-56](https://daltonbuilds.youtrack.cloud/issue/HOMELAB-56)); until then, re-run it before the 30 days are up.
+It's valid 30 days. Re-running skips a node with more than 10 days left (`LISTENER_MIN_DAYS`; `LISTENER_FORCE=1` reissues). On a node already serving the file it runs `systemctl reload openbao`, so a renewal needs no restart. OpenBao Agent renews it from Phase 0.7e on (see [Listener renewal](#listener-renewal)); the script remains the way to issue the first certificate and to recover an expired one.
 
 **The role** (`vault_baseline_openbao_tls: true`):
 
@@ -432,7 +432,7 @@ It's valid 30 days. Re-running skips a node with more than 10 days left (`LISTEN
 - removes the package's unused `/opt/openbao/tls`;
 - once the node answers over TLS, opens 8200 to VLANs 50 and 60 and sets `VAULT_ADDR=https://127.0.0.1:8200` and `VAULT_CACERT=/etc/openbao/ca.pem` in `/etc/environment`. pam_env reads that for SSH sessions, interactive or not, and for `sudo`, so `ssh dalton@192.168.40.2X bao status` works with no flags. While the node is still plain HTTP, the rules and the variables are removed.
 
-Verify adds: a TLS 1.3 handshake to the node's IP, checked against `ca.pem` and the IP SAN; TLS 1.2 refused; the leaf's CN and SANs; at least 7 days left; `listener.pem` and its directory owner and mode; the system trust store alone validating `https://localhost:8200`; `ca.pem` and the trust store matching the committed files; `/opt/openbao/tls` gone; and the two variables.
+Verify adds: a TLS 1.3 handshake to the node's IP, checked against `ca.pem` and the IP SAN; TLS 1.2 refused; the leaf's CN and SANs; at least 2 days left (`vault_baseline_listener_min_days`; the agent renews at about 3.3); the served serial equal to the file's; `listener.pem` and its directory owner and mode; the system trust store alone validating `https://localhost:8200`; `ca.pem` and the trust store matching the committed files; `/opt/openbao/tls` gone; and the two variables.
 
 **Rollout.** One restart per node, standbys first. Auto-unseal brings each node back with no one at the keyboard. TLS is set per run with `-e` until all three are done, then in `group_vars`:
 
@@ -461,6 +461,69 @@ for H in 192.168.40.20 192.168.40.21 192.168.40.22; do
   curl -sS --cacert pki/homelab-root-ca.crt -o /dev/null -w "$H %{http_code}\n" https://$H:8200/v1/sys/health
 done   # 200 from the active node, 429 from standbys: both mean TLS validated
 ```
+
+### Listener renewal
+
+Phase 0.7e ([HOMELAB-56](https://daltonbuilds.youtrack.cloud/issue/HOMELAB-56)) hands renewal to OpenBao Agent on each node. The agent logs in with the node's current listener certificate, so there's no static secret on the node.
+
+**Cert auth.** `pki/openbao-pki.sh agent-auth [node...]` sets it up on the active node with the root token from `pass`, and is safe to re-run:
+
+- `auth/cert` with role `openbao-listener`: trusts the committed intermediate alone, and only the CNs `vault-0[1-3].homelab.internal`. The CN list is what matters: `internal-services` certificates chain to the same intermediate and also carry the client flag;
+- tokens get policy `openbao-listener-renew` (`create`, `update` on `pki_int/issue/openbao-listener`, nothing else) plus `default`, which the agent needs to renew and look up its own token; 1h TTL and maximum; bound to `127.0.0.1/32`, since the agent talks to its own node's loopback.
+
+It then proves it: a `test.homelab.internal` certificate from `internal-services` is refused, and each node, standbys included, logs in as `openbao` with `listener.pem` and gets a token that can issue from `openbao-listener` and is denied `internal-services`. Test tokens are revoked on the node; nothing secret is printed.
+
+```sh
+pki/openbao-pki.sh agent-auth               # plain terminal (root token from pass)
+```
+
+**The agent** (`vault_baseline_openbao_agent: true`, which needs the TLS listener):
+
+- `/etc/openbao/agent.hcl` (`root:openbao 0640`): `exit_after_auth`, cert login with `listener.pem` against `https://127.0.0.1:8200`, and one `pkiCert` template whose destination is `listener.pem`. It asks for the node's CN and SANs and `vault_baseline_listener_ttl` (720h), writes `0400`, and keeps no `.bak` (it would hold the old key). The chain comes from `ca.pem`, so the file keeps the layout `listener` writes and an unchanged render writes nothing;
+- `openbao-agent.service`: a oneshot as `openbao`, hardened like the server unit but with `ProtectSystem=strict` and only `/etc/openbao/tls` writable. The server unit's `ProtectSystem=full` would leave `/etc` read-only;
+- `openbao-agent.timer`: 5 minutes after boot, then every 6h (`vault_baseline_agent_interval`) with up to 30 minutes' random delay;
+- `openbao-tls.path` and `openbao-tls.service` (root): the agent's rename into place triggers `systemctl reload openbao`.
+
+A run that changes the config or units starts the agent once and fails if it can't log in and render.
+
+**Why a timer, not a long-running agent.** OpenBao 2.6.5's `pkiCert` (openbao-template v1.0.1) renews when 1/9 of the certificate's lifetime or less is left, 3.3 days of 30, and that isn't configurable. Between checks a long-running agent sleeps 87–92% of the time remaining, and in about one cycle in three it wakes just above the threshold and next renews with only 8–11 hours left. A oneshot every 6h renews at 3.1–3.3 days left, every cycle.
+
+Verify adds: timer and path unit enabled and active; the last agent run and the last reload succeeded; no `listener.pem.bak`.
+
+**Rollout**, per node, after `agent-auth`:
+
+```sh
+b() { mise exec -- ansible-playbook ansible/playbooks/vault-baseline.yaml -e vault_baseline_openbao_agent=true "$@"; }
+b --check --diff --limit vault-03
+b --diff --limit vault-03
+```
+
+Then set `vault_baseline_openbao_agent: true` in `group_vars/vault.yaml`.
+
+**Watching a renewal.** Issue a short certificate, and have the agent ask for short ones and check often. With 10 minutes, renewal comes at about a minute left, so a 20s timer catches it, and the node renews every ~9 minutes:
+
+```sh
+LISTENER_TTL=10m LISTENER_FORCE=1 pki/openbao-pki.sh listener 192.168.40.22
+b --diff --limit vault-03 -e vault_baseline_listener_ttl=10m -e vault_baseline_listener_min_days=0 \
+  -e vault_baseline_agent_interval=20s -e vault_baseline_agent_random_delay=0
+ssh dalton@192.168.40.22 'journalctl -f -u openbao-agent -u openbao-tls -u openbao'
+```
+
+Restore in this order. A 30-day certificate first: with a 10-minute one still in place, the agent would leave it alone at 6h checks and it would expire.
+
+```sh
+LISTENER_FORCE=1 pki/openbao-pki.sh listener 192.168.40.22
+b --diff --limit vault-03
+```
+
+**Failure modes:**
+
+| What failed | What you see | What to do |
+|---|---|---|
+| Agent runs fail (timer stopped, unit failing) | verify: timer inactive or `Result` not `success`; the certificate counts down from 3.3 days left | `journalctl -u openbao-agent`, fix, `systemctl start openbao-agent`. Below 2 days, verify fails |
+| OpenBao sealed or unreachable | agent run fails after its retries | the next timer run retries; the certificate has days of headroom |
+| Certificate expired | the agent can't log in with it | `LISTENER_FORCE=1 pki/openbao-pki.sh listener <node>` (it falls back to the node's loopback without verification) |
+| Reload failed | verify: served serial differs from the file's | `systemctl reload openbao`; `journalctl -u openbao-tls` |
 
 ## Design references
 

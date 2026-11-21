@@ -48,3 +48,7 @@ vault_baseline_openbao_seal: gcpckms
 # HOMELAB-55: all three nodes serve the API over TLS 1.3 on their own listener certificate
 # (pki/openbao-pki.sh listener) since 2026-11-14.
 vault_baseline_openbao_tls: true
+
+# HOMELAB-56: OpenBao Agent renews each node's listener certificate on a 6h timer, through
+# auth/cert (pki/openbao-pki.sh agent-auth), since 2026-11-15.
+vault_baseline_openbao_agent: true

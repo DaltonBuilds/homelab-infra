@@ -274,3 +274,9 @@
   loop: "{{ {'VAULT_ADDR': 'https://127.0.0.1:' ~ vault_baseline_api_port, 'VAULT_CACERT': vault_baseline_openbao_ca_file} | dict2items }}"
   loop_control:
     label: "{{ item.key }}"
+
+- name: Renew the listener certificate with OpenBao Agent
+  ansible.builtin.import_tasks: agent.yaml
+  when:
+    - vault_baseline_openbao_agent | bool
+    - not vault_baseline_openbao_dry_install | bool

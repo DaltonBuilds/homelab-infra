@@ -69,5 +69,18 @@ vault_baseline_intermediate_ca_src: "{{ vault_baseline_pki_dir }}/homelab-interm
 # config differs from what it runs restarts once, auto-unseals and must come back serving
 # before the play moves on. It refuses the active node: step it down first.
 vault_baseline_openbao_restart: false
-# verify fails when the listener certificate has fewer days left (renewal is 0.7e).
-vault_baseline_listener_min_days: 7
+# verify fails when the listener certificate has fewer days left. The agent renews at about
+# 1/9 of 30 days left (3.3 days), so 2 leaves room for a missed timer run or two.
+vault_baseline_listener_min_days: 2
+
+# HOMELAB-56 (Phase 0.7e). OpenBao Agent renews listener.pem on a timer, logging in with the
+# certificate itself (pki/openbao-pki.sh agent-auth sets up auth/cert). Off until that's
+# done; it needs the TLS listener. Set per run with -e during the rollout, then group_vars.
+vault_baseline_openbao_agent: false
+vault_baseline_agent_config_path: /etc/openbao/agent.hcl
+vault_baseline_agent_role: openbao-listener
+# What the agent asks for: the role's 30 days. A short value (with -e, together with a short
+# interval and no random delay) is for watching renewals happen.
+vault_baseline_listener_ttl: 720h
+vault_baseline_agent_interval: 6h
+vault_baseline_agent_random_delay: 30min

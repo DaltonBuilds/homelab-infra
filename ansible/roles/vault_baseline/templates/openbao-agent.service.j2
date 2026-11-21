@@ -1,0 +1,26 @@
+# {{ ansible_managed }}
+# HOMELAB-56. Started by openbao-agent.timer; one renewal check, then exit. Runs as openbao
+# with the server unit's hardening, except that /etc is read-only apart from the
+# listener's directory, the one place it writes.
+[Unit]
+Description=OpenBao Agent: renew the listener certificate
+Documentation=https://openbao.org/docs/agent-and-proxy/agent/
+Wants=network-online.target
+After=network-online.target openbao.service
+ConditionFileNotEmpty={{ vault_baseline_agent_config_path }}
+
+[Service]
+Type=oneshot
+User=openbao
+Group=openbao
+ExecStart=/usr/bin/bao agent -config={{ vault_baseline_agent_config_path }}
+TimeoutStartSec=5min
+ProtectSystem=strict
+ReadWritePaths={{ vault_baseline_openbao_tls_file | dirname }}
+# tmpfs, not yes: bao looks for ~/.bao at startup and exits on EACCES, but skips ENOENT.
+ProtectHome=tmpfs
+PrivateTmp=yes
+PrivateDevices=yes
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+MemorySwapMax=0

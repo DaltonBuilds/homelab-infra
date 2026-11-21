@@ -1,0 +1,10 @@
+# {{ ansible_managed }}
+# HOMELAB-56. Triggered by openbao-tls.path. If this fails, the new file is on disk but
+# OpenBao still serves the old certificate: run `systemctl reload openbao`.
+[Unit]
+Description=Reload OpenBao onto a renewed listener certificate
+After=openbao.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl reload openbao.service
